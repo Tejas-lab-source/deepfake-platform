@@ -88,7 +88,7 @@ def test_simulation_counts_spanning_fakes_without_dropping():
 def test_fixture_graph_report(tmp_path, capsys):
     path = tmp_path / "List_of_testing_videos.txt"
     path.write_text(fixture_list_text())
-    out = tmp_path / "report.json"
+    out = tmp_path / "reports" / "report.json"  # the folder does not exist yet
     assert celebdf_graph.main(["--list", str(path), "--json", str(out), "--seeds", "5"]) == 0
     report = json.loads(out.read_text())
     assert report["videos"] == len(fixture_videos()) == 10
@@ -99,7 +99,7 @@ def test_fixture_graph_report(tmp_path, capsys):
     # Reading the list is the only file access: nothing else appears next to it.
     assert sorted(p.name for p in tmp_path.iterdir()) == [
         "List_of_testing_videos.txt",
-        "report.json",
+        "reports",
     ]
 
 

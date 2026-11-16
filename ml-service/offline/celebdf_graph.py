@@ -11,11 +11,11 @@ splits and drops nothing.
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from pathlib import Path
 
 from offline.celebdf import ListFormatError, graph_report, parse_test_list
+from offline.common import atomic_write_json
 
 DEFAULT_RATIOS = {"train": 0.6, "val": 0.2, "test": 0.2}
 
@@ -59,7 +59,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     print("Analysis only: no split was assigned and nothing was dropped.")
     if args.json:
-        args.json.write_text(json.dumps(report, indent=2))
+        atomic_write_json(args.json, report)
     return 0
 
 
