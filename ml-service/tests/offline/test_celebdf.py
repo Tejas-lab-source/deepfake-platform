@@ -11,7 +11,7 @@ from offline.celebdf import (
     parse_test_list,
     simulate_identity_split,
 )
-from offline.fixture import fixture_videos, fixture_list_text
+from offline.fixture import fixture_list_text, fixture_videos
 
 RATIOS = {"train": 0.6, "val": 0.2, "test": 0.2}
 
