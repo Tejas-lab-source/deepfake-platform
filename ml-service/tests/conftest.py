@@ -10,6 +10,7 @@ import pytest
 WEIGHTS = Path(__file__).resolve().parents[1] / "weights"
 LANDMARKER = WEIGHTS / "mediapipe" / "face_landmarker.task"
 GEND = WEIGHTS / "gend" / "model.safetensors"
+SBI = WEIGHTS / "sbi" / "FFc23.tar"
 
 HAS_ML = all(
     importlib.util.find_spec(m) is not None
@@ -23,6 +24,9 @@ needs_landmarker = pytest.mark.skipif(
 needs_gend = pytest.mark.skipif(
     not (HAS_ML and LANDMARKER.is_file() and GEND.is_file()),
     reason="needs the ML stack and downloaded weights (scripts/download_weights.sh)",
+)
+needs_sbi = pytest.mark.skipif(
+    not (HAS_ML and SBI.is_file()), reason="needs the ML stack and the SBI checkpoint (see README)"
 )
 
 

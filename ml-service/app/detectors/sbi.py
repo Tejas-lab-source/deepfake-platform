@@ -39,7 +39,12 @@ class SBIModel(nn.Module):
 class SBIDetector:
     def __init__(self, checkpoint: Path, device: torch.device) -> None:
         self.model = SBIModel()
-        state = torch.load(checkpoint, map_location="cpu")["model"]
+        # weights_only=True refuses anything but tensors and plain containers, so a tampered
+        # checkpoint cannot run code. The official file holds {"model", "optimizer", "epoch"}.
+        loaded = torch.load(checkpoint, map_location="cpu", weights_only=True)
+        if not isinstance(loaded, dict) or "model" not in loaded:
+            raise ValueError(f"{checkpoint} is not an SBI checkpoint: no 'model' entry")
+        state = loaded["model"]
         self.model.load_state_dict(state, strict=True)
         self.model.eval().requires_grad_(False)
         self.device = device

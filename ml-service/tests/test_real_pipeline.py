@@ -6,7 +6,7 @@ import pytest
 
 np = pytest.importorskip("numpy")
 
-from tests.conftest import needs_gend  # noqa: E402
+from tests.conftest import SBI, needs_gend, needs_sbi  # noqa: E402
 
 pytestmark = needs_gend
 
@@ -44,6 +44,7 @@ def test_ready_and_model_info(client):
     assert client[0].get("/ready", headers=HEADERS).json() == {"ready": True, "mockMode": False}
     info = client[0].get("/model-info", headers=HEADERS).json()
     assert info["gend"] == "yermandy/GenD_CLIP_L_14" and info["device"] in {"cpu", "cuda"}
+    assert info["sbiLoaded"] == SBI.is_file()
 
 
 def test_gend_feature_and_logit(client, crop):
@@ -86,6 +87,30 @@ def test_analyze_image_full(client):
     second = _post(client, "/analyze/image", {"path": "face.png", "explain": False}).json()
     assert second["faces"][0]["variantLogits"] == face["variantLogits"]
     assert second["faces"][0]["heatmaps"] is None
+
+
+@needs_sbi
+def test_both_detectors_score_and_explain(client):
+    body = _post(client, "/analyze/image", {"path": "face.png"}).json()
+    face = body["faces"][0]
+    sbi, gend = face["scores"]["sbi"], face["scores"]["gendHead"]
+    assert isinstance(sbi, float) and isinstance(gend, float)
+    assert np.isfinite([sbi, gend]).all()
+    assert (client[1] / face["heatmaps"]["sbi"]).is_file()
+    # With the default identity fusion, the probability is sigmoid(mean GenD logit): SBI can
+    # only change the verdict through the detectors_disagree rule.
+    assert body["probability"] == pytest.approx(1 / (1 + np.exp(-gend)), abs=1e-3)
+    reasons = {None, "near_threshold", "unstable_under_beautification", "variants_disagree"}
+    disagree = (gend >= 0) != (sbi >= 0) and abs(
+        1 / (1 + np.exp(-gend)) - 1 / (1 + np.exp(-sbi))
+    ) > 0.6
+    if body["uncertainReason"] not in reasons - {None}:
+        assert (body["uncertainReason"] == "detectors_disagree") == disagree
+
+    cmp = _post(client, "/compare", {"path": "face.png", "family": "F1", "strength": 0.8}).json()
+    assert isinstance(cmp["clean"]["scores"]["sbi"], float)
+    assert isinstance(cmp["filtered"]["scores"]["sbi"], float)
+    assert cmp["clean"]["scores"]["sbi"] == pytest.approx(sbi, abs=1e-3)
 
 
 def test_fast_mode_k0(client):

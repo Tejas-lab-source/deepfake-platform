@@ -16,7 +16,7 @@ not proof either way.
 | Phase | Scope | State |
 |---|---|---|
 | 1 | Compose skeleton, mock mode end to end | Done |
-| 2 | Real ML pipeline (GenD, SBI, filters, Grad-CAM) for images | Done; SBI weights need a manual download |
+| 2 | Real ML pipeline (GenD, SBI, filters, Grad-CAM) for images | Done |
 | 3 | Offline training and evaluation scripts | Not started |
 | 4 | Real Hive and Groq clients | Not started |
 | 5 | Full frontend, video path, PDF report | Not started |
@@ -82,11 +82,16 @@ room per analysis, and the UI also polls as a fallback.
 
    On Linux, MediaPipe also needs `libegl1` and `libgles2` (`apt-get install libegl1 libgles2`).
 
-2. **SBI weights are a manual step.** They are on Google Drive, which usually refuses scripted
-   downloads. If the script says it could not fetch them, open the "c23" link in the
+2. **SBI weights may need a manual step.** They are on Google Drive, which sometimes refuses
+   scripted downloads. If the script says it could not fetch them, open the "c23" link in the
    [SBI README](https://github.com/mapooon/SelfBlendedImages#2-pretrained-model), download
    the file and save it as `ml-service/weights/sbi/FFc23.tar`. Without it the pipeline still
    runs, with GenD only (`scores.sbi` is `null`).
+
+   The file used to validate this project was 141,290,933 bytes with SHA-256
+   `2b05c2ba36ccb9e9f4f9e1aae9acd443ae2e6400ce725f56104fdb175d3c3267`. The authors publish no
+   checksum, so this only tells you whether you have the same file. Despite its name it is
+   a PyTorch checkpoint (a zip container), not a tar. It is loaded with `weights_only=True`.
 
 3. Run with Docker (builds a larger image, about 2.5 GB):
 
@@ -132,14 +137,33 @@ Without it, F4 requests return 501 and everything else works.
 
 ### CPU latency
 
-Measured with `scripts/bench.py` on a 4-core x86 VM, PyTorch 2.2.2 CPU, one face, without SBI
-(median of 3 runs). No GPU was available, so there is no GPU figure.
+Measured with `scripts/bench.py` on a 4-core Intel Xeon 2.1 GHz VM, PyTorch 2.2.2 CPU, 4
+threads, one face, median of 5 runs. No GPU was available, so there is no GPU figure. K only
+applies to GenD; SBI always scores the clean crop once.
 
-| Setting | Total | Detect | Beautify | Score | Explain |
-|---|---|---|---|---|---|
-| K = 0, no heatmaps | 0.5 s | 38 ms | 13 ms | 455 ms | 0 |
-| K = 4, no heatmaps | 2.9 s | 37 ms | 272 ms | 2583 ms | 0 |
-| K = 4, heatmaps | 5.3 s | 39 ms | 287 ms | 2025 ms | 2900 ms |
+Detectors alone:
+
+| Step | Time |
+|---|---|
+| GenD forward, 1 crop (K = 0) | 461 ms |
+| GenD forward, 5 crops (K = 4) | 2336 ms |
+| GenD Grad-CAM, 1 crop | 1274 ms |
+| GenD Grad-CAM, 2 crops (clean + one copy, for the IoU) | 2775 ms |
+| SBI forward, 1 crop | 112 ms |
+| SBI Grad-CAM, 1 crop | 2356 ms |
+
+Full pipeline (ms):
+
+| Detectors | K | Heatmaps | Total | Detect | Beautify | Score | Explain |
+|---|---|---|---|---|---|---|---|
+| GenD only | 0 | off | 589 | 48 | 16 | 523 | 0 |
+| GenD only | 0 | on | 2104 | 54 | 20 | 471 | 1557 |
+| GenD only | 4 | off | 2463 | 42 | 276 | 2145 | 0 |
+| GenD only | 4 | on | 5055 | 39 | 303 | 2029 | 2683 |
+| GenD + SBI | 0 | off | 626 | 38 | 13 | 573 | 0 |
+| GenD + SBI | 0 | on | 4139 | 52 | 15 | 571 | 3500 |
+| GenD + SBI | 4 | off | 2567 | 51 | 293 | 2223 | 0 |
+| GenD + SBI | 4 | on | 7408 | 49 | 285 | 2241 | 4832 |
 
 ## Development
 

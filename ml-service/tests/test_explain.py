@@ -2,7 +2,7 @@ import pytest
 
 np = pytest.importorskip("numpy")
 
-from tests.conftest import needs_ml  # noqa: E402
+from tests.conftest import SBI, needs_ml, needs_sbi  # noqa: E402
 
 pytestmark = needs_ml
 
@@ -87,6 +87,43 @@ def test_sbi_checkpoint_format_round_trip(tmp_path):
     path = tmp_path / "FFc23.tar"
     torch.save({"model": SBIModel().state_dict()}, path)
     assert SBIDetector(path, torch.device("cpu")).model.net._fc.out_features == 2
+
+
+def test_sbi_loader_rejects_pickled_code_and_wrong_files(tmp_path):
+    """weights_only=True: a checkpoint that smuggles a Python object must not load."""
+    import pickle
+
+    import torch
+
+    from app.detectors.sbi import SBIDetector
+
+    bad = tmp_path / "evil.tar"
+    torch.save({"model": {}, "extra": print}, bad)
+    with pytest.raises(pickle.UnpicklingError):
+        SBIDetector(bad, torch.device("cpu"))
+    plain = tmp_path / "plain.tar"
+    torch.save({"weights": {}}, plain)
+    with pytest.raises(ValueError, match="not an SBI checkpoint"):
+        SBIDetector(plain, torch.device("cpu"))
+
+
+@needs_sbi
+def test_official_sbi_checkpoint_loads_and_scores(photo, face):
+    import torch
+
+    from app.detectors.sbi import SBIDetector
+    from app.explain import gradcam_sbi
+    from app.faces import sbi_crop
+
+    sbi = SBIDetector(SBI, torch.device("cpu"))
+    crop = sbi_crop(photo, face.box)
+    logits = sbi.score([crop, crop])
+    assert logits.shape == (2,) and np.isfinite(logits).all()
+    assert logits[0] == pytest.approx(logits[1], abs=1e-4)
+    # A plain studio portrait of a real person: SBI should lean "not fake".
+    assert logits[0] < 0
+    cam = gradcam_sbi(sbi, [crop])
+    assert cam.shape == (1, 380, 380) and cam.max() > 0
 
 
 def test_linear_head_math(tmp_path):
