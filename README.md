@@ -18,7 +18,7 @@ not proof either way.
 | 1 | Compose skeleton, mock mode end to end | Done |
 | 2 | Real ML pipeline (GenD, SBI, filters, Grad-CAM) for images | Done |
 | 3 | Offline training, calibration and evaluation scripts | Done on the fixture; real data awaits Celeb-DF access |
-| 4 | Real Hive and Groq clients | Not started |
+| 4 | Real Hive and Groq clients, API budgets, explanation checks | Built and tested with fake API responses; live API calls not yet verified |
 | 5 | Full frontend, video path, PDF report | Not started |
 | 6 | Hardening and CI | Not started |
 
@@ -26,9 +26,10 @@ Mock mode is the default. In mock mode every score is derived from the file's sh
 scores are repeatable but say nothing about the image.
 
 Real mode (`MOCK_MODE=false`) runs the real image pipeline in the ML service. Still missing
-in real mode: video analysis (Phase 5), the Hive second check and Groq explanations
-(Phase 4), and heatmaps in the UI (Phase 5). The Phase 3 training scripts exist, but no
-head has been trained on real data, so real-mode verdicts use GenD's own logit with
+in real mode: video analysis (Phase 5) and heatmaps in the UI (Phase 5). The Hive second
+check and Groq explanations are implemented (Phase 4) but have **not yet been tested
+against the live APIs**; see "Phase 4: external APIs". The Phase 3 training scripts exist,
+but no head has been trained on real data, so real-mode verdicts use GenD's own logit with
 **uncalibrated defaults** (threshold 0.5, T = 1). Do not read them as results.
 
 ## Run it
@@ -43,6 +44,10 @@ Then open http://localhost:8080, create an account and upload an image.
 
 To change ports or secrets, copy `.env.example` to `.env` and edit it. The defaults are for
 development only; the server refuses to start with them when `NODE_ENV=production`.
+
+This runs in **mock mode**: no API keys, no external network access and no cost. The Hive
+second check returns repeatable placeholder scores and explanations come from a built-in
+template. To use the real Hive and Groq APIs, see "Phase 4: external APIs" below.
 
 ### Smoke test
 
@@ -219,6 +224,85 @@ arbitrary labels. They are not accuracy results and must not be reported as such
   `model_card.json`, and refuses fixture or insufficiently validated cards unless
   `ALLOW_UNVALIDATED_MODEL_CARD=true` (tests only).
 
+## Phase 4: external APIs
+
+Each upload can get two external services: **Hive** as an independent second check, and
+**Groq** for a plain-English explanation. Neither is needed to run the project, and neither
+can change our verdict on its own terms: Hive can only confirm it or downgrade a
+non-confident verdict to UNCERTAIN (the reconciler, unchanged since Phase 1), and Groq only
+writes text. Full reference: [server/README.md](server/README.md).
+
+> **Validation status.** Both clients are built from the official API documentation
+> (checked 16 Nov 2026) and tested against fake responses, a real Redis and the full mock
+> stack. **No real Hive or Groq call has been made yet.** The first live calls may still
+> reveal differences from the documentation.
+
+### Modes
+
+Each service has its own switch: `HIVE_MODE` and `GROQ_MODE`, each `mock`, `real` or `off`.
+Left empty, both follow `MOCK_MODE` (`mock` when true, `real` when false).
+
+| Mode | Hive second check | Groq explanation |
+|---|---|---|
+| `mock` | Placeholder scores from the file hash; no network, no cost | Built-in template |
+| `real` | Hive v3 API, budgeted; needs `HIVE_API_KEY` | Groq API, validated; needs `GROQ_API_KEY` |
+| `off` | Not run; recorded as `disabled` | Built-in template |
+
+Real mode without a key does not fail: the check is recorded as `not_configured` (the result
+is then a single check) and the explanation uses the template.
+
+### Privacy: consent before anything is sent to Hive
+
+- A file is sent to Hive **only** when the uploader ticks the per-upload consent box
+  (`externalCheck=true`). It is off by default.
+- Without consent nothing is sent, cached or recorded about Hive for that upload.
+- Only the file is sent, under the neutral name `upload`: never the original file name, the
+  user's identity or the analysis.
+- Groq never receives the image. It receives only a fixed list of result fields (verdicts,
+  scores, thresholds, badge), never file bytes, paths, file names or hashes.
+
+### Budgets and caching
+
+Neither API is treated as free. Every request that is about to be sent takes one unit from a
+daily budget in Redis, atomically, so concurrent uploads cannot overspend.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `HIVE_DAILY_LIMIT` | 100 | Hive requests per UTC day in total (Hive v3's documented default limit) |
+| `HIVE_DEMO_RESERVE` | 20 | Part of the daily limit only users with the `admin` role may use |
+| `HIVE_USER_DAILY_LIMIT` | 10 | Hive requests per regular user per day |
+| `HIVE_RETRIES` | 0 | Each retry is a separately billed request |
+| `GROQ_DAILY_LIMIT` | 900 | Groq requests per UTC day |
+
+- **Never refunded.** A unit is counted when a request is sent and kept even if it fails,
+  because neither provider documents billing for failed requests.
+- **Provider limit hit.** A Hive 429 response stops all Hive requests until the next UTC day.
+- **Cache hits are free.** A successful Hive result is reused for any later upload of the same
+  file (matched by SHA-256), and a Groq explanation is reused for identical result facts.
+  Failures are not cached, so a later upload tries again.
+- **Duplicate uploads.** Two uploads of the same file at the same time trigger one Hive
+  request; the second waits for its result.
+
+### Fallbacks
+
+Nothing external can fail an analysis. A Hive problem (no consent, budget, timeout, auth,
+rate limit, unexpected response) gives a single-check result with the reason stored and
+shown in the API. Any Groq problem, including a response that fails validation, gives the
+template explanation with the reason stored. Groq responses are rejected as a whole if they
+break the schema, use the words "authentic" or "proven", omit that the check is automated,
+contradict the verdict, skip a disagreement, hide mock mode, contain a link, or contain any
+number that is not in the result.
+
+### Enabling the real APIs
+
+1. Put the keys in `.env` (never commit it): `HIVE_API_KEY` (a Hive V3 key from "Service API
+   Keys") and `GROQ_API_KEY`.
+2. Set `HIVE_MODE=real` and/or `GROQ_MODE=real` (or `MOCK_MODE=false` for everything).
+3. Restart: `docker compose up --build`. The server log shows the active modes and warns,
+   without printing any key, if a real mode has no key.
+4. Upload with the consent box ticked to use Hive. The analysis response shows the second
+   check's status and, if unavailable, why (`external.reason`).
+
 ## Development
 
 ```bash
@@ -229,7 +313,8 @@ python -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 .venv/bin/pytest && .venv/bin/ruff check . && .venv/bin/black --check . && .venv/bin/mypy app offline
 # Tests that need the ML stack or the weights are skipped until both are installed.
 
-# Server (Node 22)
+# Server (Node 22). The budget tests need a running Redis on localhost:6379 and fail if
+# it is missing; set SKIP_REDIS_TESTS=1 only to skip them on purpose.
 cd server
 npm ci && npm test && npm run typecheck && npm run lint
 
@@ -263,7 +348,7 @@ This is an academic, non-commercial project.
 | GFPGAN (optional F4) | Apache-2.0; check the terms of its weights before use |
 | CodeFormer (not used) | Non-commercial (S-Lab License) |
 | DeepfakeBench weights (not used) | CC BY-NC |
-| Hive, Groq | Their own terms of service |
+| Hive, Groq | Their own terms of service and pricing; uploads go to Hive only with consent |
 
 Tests use scikit-image's bundled astronaut photo (NASA, public domain). No dataset images are
 stored in this repository.

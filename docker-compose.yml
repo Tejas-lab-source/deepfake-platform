@@ -70,6 +70,7 @@ services:
       # Second check (Hive v3). Empty mode = follow MOCK_MODE (mock or real); "off" disables.
       HIVE_MODE: ${HIVE_MODE:-}
       HIVE_API_KEY: ${HIVE_API_KEY:-}
+      HIVE_API_URL: ${HIVE_API_URL:-}
       HIVE_THRESHOLD: ${HIVE_THRESHOLD:-0.9}
       HIVE_TIMEOUT_MS: ${HIVE_TIMEOUT_MS:-15000}
       HIVE_DAILY_LIMIT: ${HIVE_DAILY_LIMIT:-100}
@@ -79,6 +80,7 @@ services:
       # Explanations (Groq). Empty mode = follow MOCK_MODE; mock and off use the template.
       GROQ_MODE: ${GROQ_MODE:-}
       GROQ_API_KEY: ${GROQ_API_KEY:-}
+      GROQ_BASE_URL: ${GROQ_BASE_URL:-}
       GROQ_MODEL_EXPLAIN: ${GROQ_MODEL_EXPLAIN:-openai/gpt-oss-120b}
       GROQ_MODEL_CHAT: ${GROQ_MODEL_CHAT:-openai/gpt-oss-20b}
       GROQ_MODEL_FALLBACKS: ${GROQ_MODEL_FALLBACKS:-openai/gpt-oss-20b}
