@@ -95,6 +95,10 @@ analysesRouter.get('/:id', async (req, res) => {
       threshold: external.threshold,
       verdict: external.verdict,
       latencyMs: external.latencyMs,
+      // Why there are no scores, if any (not_configured, disabled, budget:user_limit, ...).
+      reason: external.reason ?? null,
+      // Per-frame scores for videos; the scores above are their maxima.
+      frames: external.frames ?? [],
     },
     explanation: explanation && {
       summary: explanation.summary,

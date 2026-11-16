@@ -70,6 +70,18 @@ const externalCheckSchema = new Schema(
     verdict: { type: String, enum: ['FAKE', 'REAL', null], default: null },
     latencyMs: { type: Number, default: null },
     rawResponse: { type: Schema.Types.Mixed, default: null },
+    // Phase 4: why no scores were produced (not_configured, budget:user_limit, auth, ...).
+    reason: { type: String, default: null },
+    // Phase 4: per-frame scores (video); deepfakeScore/aiGeneratedScore are their maxima.
+    frames: {
+      type: [
+        new Schema(
+          { frameIndex: Number, timestamp: Number, deepfake: Number, aiGenerated: Number },
+          { _id: false },
+        ),
+      ],
+      default: [],
+    },
   },
   { timestamps: true },
 );
@@ -84,6 +96,12 @@ const explanationSchema = new Schema(
     why: { type: String, required: true },
     caveats: { type: [String], default: [] },
     fallbackUsed: { type: Boolean, required: true },
+    // Phase 4: why the template was used (groq_mock, not_configured, invalid:..., budget:...).
+    fallbackReason: { type: String, default: null },
+    // Phase 4: cache key of the facts Groq was shown; identical facts reuse the explanation.
+    inputSha256: { type: String, default: null, index: true },
+    latencyMs: { type: Number, default: null },
+    usage: { type: Schema.Types.Mixed, default: null },
   },
   { timestamps: true },
 );

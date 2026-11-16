@@ -1,0 +1,23 @@
+{
+  "_source": "Example structure from docs.thehive.ai, AI-Generated and Deepfake Content Detection Playground (checked 16 Nov 2026). Comments removed; task_id and model added from the documented response fields.",
+  "task_id": "00000000-0000-0000-0000-000000000000",
+  "model": "hive/ai-generated-and-deepfake-content-detection",
+  "output": [
+    {
+      "extra": [
+        { "name": "frame_index", "value": 0 },
+        { "name": "timestamp", "value": 0.0 }
+      ],
+      "classes": [
+        { "class": "not_ai_generated", "value": 0.98 },
+        { "class": "ai_generated", "value": 0.02 },
+        { "class": "midjourney", "value": 0.01 },
+        { "class": "stablediffusion", "value": 0.0 },
+        { "class": "none", "value": 0.99 },
+        { "class": "deepfake", "value": 0.03 },
+        { "class": "not_ai_generated_audio", "value": 1.0 },
+        { "class": "ai_generated_audio", "value": 0.0 }
+      ]
+    }
+  ]
+}

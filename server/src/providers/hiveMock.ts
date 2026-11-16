@@ -16,17 +16,3 @@ export class MockHiveVerifier implements Verifier {
     return { status: 'ok', deepfakeScore, aiGeneratedScore, raw: { mock: true } };
   }
 }
-
-/** Used when MOCK_MODE=false until the real Hive client lands in Phase 4. */
-export class UnavailableVerifier implements Verifier {
-  readonly provider = 'hive';
-
-  async verify(): Promise<VerifierResult> {
-    return {
-      status: 'error',
-      deepfakeScore: null,
-      aiGeneratedScore: null,
-      raw: { error: 'Hive client is not implemented yet (Phase 4)' },
-    };
-  }
-}
