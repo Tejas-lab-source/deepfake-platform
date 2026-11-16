@@ -17,6 +17,12 @@ beforeAll(async () => {
   } catch {
     available = false;
   }
+  // Fail loudly rather than skip: these tests guard the API budget. Skipping must be explicit.
+  if (!available && process.env.SKIP_REDIS_TESTS !== '1') {
+    throw new Error(
+      `Redis is not reachable at ${url}. Start Redis, or set SKIP_REDIS_TESTS=1 to skip on purpose.`,
+    );
+  }
 });
 afterAll(async () => {
   if (available) {
