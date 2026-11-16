@@ -15,5 +15,8 @@ ml-service/artifacts/
 # Datasets must never be committed.
 ml-service/data/
 uploads/
+# M7 live-check outputs and local settings (keys) are never committed.
+server/live-check/out/
+server/live-check/.env.m7
 *.log
 .DS_Store
