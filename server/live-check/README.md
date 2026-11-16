@@ -14,9 +14,20 @@ parser and validation.
 | Hive | A generated abstract image (gradients and rings: no person, no face), as multipart field `media` named `upload`, type `image/png` | User images, file names, paths, user identity |
 | Groq | The system prompt and the whitelisted result JSON built from `synthetic-result.json`, exactly as the app builds it | Any image, file name, path, hash or personal data |
 
-At most **one billed request per service**: no retries and a single Groq model. The live
-run calls the providers directly, outside the app's Redis budget counter, so this one Hive
-request also counts against Hive's own 100-a-day limit.
+At most **one billed request per service**: no retries and a single Groq model.
+
+## Safeguards in a live run
+
+| Safeguard | Behaviour |
+|---|---|
+| Live gate | Needs both `--live` and `M7_LIVE=1`; otherwise only a dry run is possible |
+| Destinations | Only `https://api.thehive.ai/api/v3/hive/ai-generated-and-deepfake-content-detection` and `https://api.groq.com/openai/v1/chat/completions`: HTTPS, default port, no credentials or query in the URL. A custom `HIVE_API_URL` or `GROQ_BASE_URL` is refused before anything starts, and every request is checked again just before sending |
+| Redirects | Never followed (`redirect: manual`); any 3xx answer is refused, so the authorization header cannot reach another host |
+| Hive budget | One unit is reserved in the app's Redis daily Hive budget (same code and limits as the app, demo pool, identity `m7-live-check`) before the Hive request. Denied, or Redis unreachable: nothing is sent. Never refunded, even after a timeout. A Hive 429 marks the day exhausted, as in the app |
+| Groq | One HTTP attempt and one model |
+| Repeat runs | Refused while any earlier `live-report-*.json` or `live-run-*.marker` exists in `out/`, unless `--allow-repeat` is given. The marker is written before the first request; reports are created new each time and never overwritten or deleted |
+
+A live run needs Redis (default `redis://localhost:6379`, or `REDIS_URL`).
 
 ## Files
 
@@ -26,7 +37,7 @@ request also counts against Hive's own 100-a-day limit.
 | `synthetic-result.json` | Synthetic analysis result for the Groq check | Yes |
 | `../scripts/liveCheck.ts` | The check: dry run by default; live only with `--live` and `M7_LIVE=1` | Yes |
 | `.env.m7` | Your local settings, copied from the template | **No** (gitignored) |
-| `out/` | Reports, scrubbed of secrets | **No** (gitignored) |
+| `out/` | `dry-run-report.json`, and per live run `live-run-<time>.marker` and `live-report-<time>.json`, scrubbed of secrets | **No** (gitignored) |
 
 ## Dry run (no network)
 
@@ -54,8 +65,10 @@ with simulated documented responses, runs the parser and validation, and writes
    ```
 
    `NODE_USE_ENV_PROXY=1` is only needed in the sandbox, where traffic goes through a proxy.
-4. Review `out/live-report.json`:
+4. Review `out/live-report-<time>.json`:
    - Hive: status, scores and the scrubbed raw response;
+   - the budget reservation and usage after the request;
+   - the destination guard's log;
    - Groq: status, model, token usage, and whether the explanation passed validation.
 
    If Hive's real response differs from the documented shape, the parser reports
