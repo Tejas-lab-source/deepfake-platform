@@ -1,7 +1,7 @@
 import { createServer } from 'node:http';
 import mongoose from 'mongoose';
 import { createApp } from './app.js';
-import { config } from './config.js';
+import { config, configWarnings } from './config.js';
 import { logger } from './logger.js';
 import { closeQueues } from './queue/queues.js';
 import { startWorkers } from './queue/workers.js';
@@ -13,7 +13,16 @@ async function main(): Promise<void> {
   const io = attachSockets(server);
   const workers = startWorkers();
   server.listen(config.PORT, () => {
-    logger.info({ port: config.PORT, mockMode: config.MOCK_MODE }, 'server listening');
+    logger.info(
+      {
+        port: config.PORT,
+        mockMode: config.MOCK_MODE,
+        hiveMode: config.HIVE_MODE,
+        groqMode: config.GROQ_MODE,
+      },
+      'server listening',
+    );
+    for (const warning of configWarnings(config)) logger.warn(warning);
   });
 
   const shutdown = async (signal: string): Promise<void> => {
