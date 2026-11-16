@@ -46,15 +46,38 @@ def _run_cam(model: Any, layer: Any, inputs: torch.Tensor, reshape: Any = None) 
     return out
 
 
-def gradcam_gend(gend: Any, crops: list[NDArray[np.uint8]]) -> Heatmap:
-    """Grad-CAM on GenD's last transformer block. Returns (N, 224, 224) maps in [0, 1]."""
+class _HeadOnGenD(torch.nn.Module):
+    """GenD's encoder followed by the loaded linear head: the model whose logit the service
+    actually reports, so Grad-CAM explains the verdict rather than GenD's original head."""
+
+    def __init__(self, gend_model: Any, head: Any) -> None:
+        super().__init__()
+        self.gend_model = gend_model
+        self.register_buffer("weight", torch.as_tensor(head.weight, dtype=torch.float32))
+        self.register_buffer("bias", torch.tensor(float(head.bias), dtype=torch.float32))
+        self.l2_normalize = bool(head.l2_normalize)
+
+    def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
+        x = self.gend_model.features(pixel_values).float()
+        if self.l2_normalize:
+            x = torch.nn.functional.normalize(x, p=2, dim=1)
+        out: torch.Tensor = (x @ self.weight + self.bias).unsqueeze(1)
+        return out
+
+
+def gradcam_gend(gend: Any, crops: list[NDArray[np.uint8]], head: Any = None) -> Heatmap:
+    """Grad-CAM on GenD's last transformer block. Returns (N, 224, 224) maps in [0, 1].
+
+    With a loaded head, the target is that head's logit; otherwise GenD's own logit.
+    """
     model = gend.model
     half = next(model.parameters()).dtype == torch.float16
     if half:
         model.float()  # gradients in fp16 are unreliable
     try:
         layer = model.feature_extractor.vision_model.encoder.layers[-1].layer_norm1
-        return _run_cam(model, layer, gend.preprocess(crops), vit_reshape_transform)
+        target = model if head is None else _HeadOnGenD(model, head)
+        return _run_cam(target, layer, gend.preprocess(crops).float(), vit_reshape_transform)
     finally:
         if half:
             model.half()

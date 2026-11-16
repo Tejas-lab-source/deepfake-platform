@@ -39,6 +39,10 @@ class Settings(BaseSettings):
     max_explain_faces: int = 1
     heatmap_top_fraction: float = 0.2
 
+    # Lets the service start with a fixture model card or one fitted on insufficient
+    # validation data. For tests only: such cards produce meaningless verdicts.
+    allow_unvalidated_model_card: bool = False
+
     log_level: str = "INFO"
 
     @property

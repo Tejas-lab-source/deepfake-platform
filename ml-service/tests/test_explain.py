@@ -127,17 +127,12 @@ def test_official_sbi_checkpoint_loads_and_scores(photo, face):
 
 
 def test_linear_head_math(tmp_path):
-    import torch
-
+    """The head's arithmetic. Loading from file (1024-value shape, weights_only, SHA-256)
+    is covered in tests/test_head_files.py."""
     from app.head import LinearHead
 
     assert LinearHead.load(tmp_path / "head.pt") is None
-    torch.save(
-        {"weight": torch.tensor([3.0, 4.0]), "bias": 0.5, "l2_normalize": True},
-        tmp_path / "head.pt",
-    )
-    head = LinearHead.load(tmp_path / "head.pt")
-    assert head is not None
+    head = LinearHead(np.array([3.0, 4.0], dtype=np.float32), 0.5, True)
     # (3, 4) normalised is (0.6, 0.8): 3*0.6 + 4*0.8 + 0.5 = 5.5, whatever the input's length.
     out = head.logits(np.array([[3.0, 4.0], [30.0, 40.0]]))
     assert out == pytest.approx([5.5, 5.5])
