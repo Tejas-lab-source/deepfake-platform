@@ -22,3 +22,18 @@ plugins = ["pydantic.mypy"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+
+[[tool.mypy.overrides]]
+module = [
+  "cv2.*", "mediapipe.*", "skimage.*", "facenet_pytorch.*", "pytorch_grad_cam.*",
+  "efficientnet_pytorch.*", "transformers.*", "safetensors.*", "gfpgan.*", "torch.*", "PIL.*",
+]
+ignore_missing_imports = true
+follow_imports = "skip"
+
+# The ML libraries above are untyped (or skipped), so values that come from them are Any.
+[[tool.mypy.overrides]]
+module = ["app.*"]
+warn_return_any = false
+disallow_subclassing_any = false
+disallow_untyped_decorators = false
