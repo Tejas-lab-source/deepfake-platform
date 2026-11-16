@@ -54,11 +54,21 @@ def test_rejects_wrong_magic_bytes_and_path_escape(client):
     assert escape.status_code == 422
 
 
-def test_real_mode_reports_not_ready(client, monkeypatch):
+def test_real_mode_reports_not_ready_until_models_load(client, monkeypatch):
     monkeypatch.setattr(main.settings, "mock_mode", False)
+    monkeypatch.setattr(main.state, "pipeline", None)
     assert client.get("/ready", headers=HEADERS).status_code == 503
     r = client.post("/analyze/image", json={"path": "sample.png"}, headers=HEADERS)
-    assert r.status_code == 503
+    assert r.status_code == 503 and "loading" in r.json()["detail"]
+    monkeypatch.setattr(main.state, "error", "FileNotFoundError: weights/gend/config.json")
+    r = client.get("/ready", headers=HEADERS)
+    assert r.status_code == 503 and "download_weights" in r.json()["detail"]
+
+
+def test_filters_need_the_real_pipeline(client):
+    body = {"path": "sample.png", "family": "F1", "strength": 0.5}
+    assert client.post("/compare", json=body, headers=HEADERS).status_code == 501
+    assert client.post("/beautify", json=body, headers=HEADERS).status_code == 501
 
 
 def test_sniff():

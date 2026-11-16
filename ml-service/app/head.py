@@ -1,7 +1,8 @@
-"""Fusion and calibration values, loaded from model_card.json.
+"""Linear head, fusion and calibration.
 
-The linear head itself (head.pt) is loaded here from Phase 2 onwards. With no model card
-the defaults are identity fusion, T = 1 and threshold 0.5.
+Calibration values load from model_card.json; with no model card the defaults are identity
+fusion, T = 1 and threshold 0.5. The invariance-trained linear head loads from head.pt; when
+that file is missing the pipeline uses GenD's own logit.
 """
 
 from __future__ import annotations
@@ -66,6 +67,39 @@ def load_calibration(path: Path) -> Calibration:
         version=str(data.get("version", "unversioned")),
         sources=dict(data.get("sources", {})),
     )
+
+
+@dataclass(frozen=True)
+class LinearHead:
+    """Linear head on GenD's 1024-d features: logit = w . f(x) + b.
+
+    head.pt is a torch-saved dict {"weight": (D,), "bias": scalar, "l2_normalize": bool},
+    written by offline/train_head.py.
+    """
+
+    weight: Any  # numpy float32 array, shape (D,)
+    bias: float
+    l2_normalize: bool
+
+    @staticmethod
+    def load(path: Path) -> LinearHead | None:
+        if not path.is_file():
+            return None
+        import numpy as np
+        import torch
+
+        data = torch.load(path, map_location="cpu")
+        weight = np.asarray(data["weight"], dtype=np.float32).reshape(-1)
+        return LinearHead(weight, float(data["bias"]), bool(data.get("l2_normalize", True)))
+
+    def logits(self, features: Any) -> Any:
+        """features: (N, D) array -> (N,) logits."""
+        import numpy as np
+
+        x = np.asarray(features, dtype=np.float32)
+        if self.l2_normalize:
+            x = x / np.maximum(np.linalg.norm(x, axis=1, keepdims=True), 1e-12)
+        return x @ self.weight + self.bias
 
 
 def sigmoid(x: float) -> float:

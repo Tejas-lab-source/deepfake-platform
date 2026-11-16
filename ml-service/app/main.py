@@ -7,15 +7,19 @@ import json
 import logging
 import threading
 import time
-from typing import Annotated, Any
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Annotated, Any, Literal
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Response
 from pydantic import BaseModel, Field
 
 from app import mock
 from app.config import Settings, get_settings
 from app.head import Calibration, load_calibration
 from app.media import MediaError, resolve_upload, validate
+from app.pipeline import PipelineError, RealPipeline
 
 
 class JsonFormatter(logging.Formatter):
@@ -29,6 +33,8 @@ class JsonFormatter(logging.Formatter):
         extra = getattr(record, "data", None)
         if isinstance(extra, dict):
             payload.update(extra)
+        if record.exc_info:
+            payload["exc"] = self.formatException(record.exc_info)
         return json.dumps(payload)
 
 
@@ -44,12 +50,44 @@ settings = get_settings()
 _configure_logging(settings.log_level)
 log = logging.getLogger("ml-service")
 
-app = FastAPI(title="deepfake ml-service", docs_url=None, redoc_url=None)
 calibration: Calibration = load_calibration(settings.model_card_path)
 # Inference runs one request at a time.
 inference_lock = threading.Lock()
 
-REAL_MODE_MESSAGE = "Real models are not implemented yet (Phase 2). Run with MOCK_MODE=true."
+
+class ModelState:
+    """The real pipeline, loaded once at startup in a background thread."""
+
+    def __init__(self) -> None:
+        self.pipeline: RealPipeline | None = None
+        self.error: str | None = None
+
+    def load(self) -> None:
+        start = time.perf_counter()
+        try:
+            self.pipeline = RealPipeline(settings, calibration)
+            log.info(
+                "models loaded",
+                extra={"data": {"seconds": round(time.perf_counter() - start, 1)}},
+            )
+        except Exception as exc:  # noqa: BLE001 - reported through /ready
+            self.error = f"{type(exc).__name__}: {exc}"
+            log.exception("model loading failed")
+
+
+state = ModelState()
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    if not settings.mock_mode:
+        threading.Thread(target=state.load, name="model-loader", daemon=True).start()
+    yield
+    if state.pipeline is not None:
+        state.pipeline.close()
+
+
+app = FastAPI(title="deepfake ml-service", docs_url=None, redoc_url=None, lifespan=lifespan)
 
 
 def require_secret(
@@ -63,6 +101,7 @@ def require_secret(
 
 
 Secured = Depends(require_secret)
+Family = Literal["F1", "F2", "F3", "F4"]
 
 
 class AnalyzeImageRequest(BaseModel):
@@ -77,8 +116,29 @@ class AnalyzeVideoRequest(BaseModel):
     k: int | None = Field(default=None, ge=0, le=16)
 
 
-def _models_ready() -> bool:
-    return settings.mock_mode
+class FilterRequest(BaseModel):
+    path: str
+    family: Family
+    strength: float = Field(ge=0.0, le=1.0)
+
+
+def _real() -> RealPipeline:
+    """The loaded real pipeline, or a 503 explaining why it is not there."""
+    if state.pipeline is not None:
+        return state.pipeline
+    if state.error is not None:
+        detail = f"Models failed to load: {state.error}. Run scripts/download_weights.sh."
+        raise HTTPException(status_code=503, detail=detail)
+    raise HTTPException(status_code=503, detail="Models are still loading.")
+
+
+def _file(path: str, kind: Literal["image", "video"]) -> Path:
+    try:
+        file = resolve_upload(settings.upload_dir, path)
+        validate(file, kind, settings.max_image_mb if kind == "image" else settings.max_video_mb)
+    except MediaError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return file
 
 
 @app.get("/health")
@@ -88,14 +148,14 @@ def health() -> dict[str, str]:
 
 @app.get("/ready", dependencies=[Secured])
 def ready() -> dict[str, Any]:
-    if not _models_ready():
-        raise HTTPException(status_code=503, detail=REAL_MODE_MESSAGE)
+    if not settings.mock_mode:
+        _real()
     return {"ready": True, "mockMode": settings.mock_mode}
 
 
 @app.get("/model-info", dependencies=[Secured])
 def model_info() -> dict[str, Any]:
-    return {
+    info: dict[str, Any] = {
         "mockMode": settings.mock_mode,
         "k": settings.k,
         "maxFrames": settings.max_frames,
@@ -103,37 +163,39 @@ def model_info() -> dict[str, Any]:
         "headLoaded": False,
         "calibration": calibration.to_dict(),
     }
+    if state.pipeline is not None:
+        info.update(state.pipeline.info())
+    elif not settings.mock_mode:
+        info["loadError"] = state.error
+    return info
 
 
 @app.post("/analyze/image", dependencies=[Secured])
 def analyze_image(req: AnalyzeImageRequest) -> dict[str, Any]:
-    if not _models_ready():
-        raise HTTPException(status_code=503, detail=REAL_MODE_MESSAGE)
-    try:
-        file = resolve_upload(settings.upload_dir, req.path)
-        validate(file, "image", settings.max_image_mb)
-    except MediaError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    pipeline = None if settings.mock_mode else _real()
+    file = _file(req.path, "image")
     k = settings.k if req.k is None else req.k
     with inference_lock:
         start = time.perf_counter()
-        result = mock.analyze_image(file, calibration, k)
-        score_ms = round((time.perf_counter() - start) * 1000)
-    # Mock mode runs no detection, beautification or Grad-CAM, so those stages take 0 ms.
-    result["timingsMs"] = {"detect": 0, "beautify": 0, "score": score_ms, "explain": 0}
-    log.info("analyze_image", extra={"data": {"verdict": result["verdict"], "ms": score_ms}})
+        if pipeline is None:
+            result = mock.analyze_image(file, calibration, k)
+            # Mock mode runs no detection, beautification or Grad-CAM: those take 0 ms.
+            score_ms = round((time.perf_counter() - start) * 1000)
+            result["timingsMs"] = {"detect": 0, "beautify": 0, "score": score_ms, "explain": 0}
+        else:
+            result = pipeline.analyze_image(file, k, req.explain)
+        total_ms = round((time.perf_counter() - start) * 1000)
+    log.info("analyze_image", extra={"data": {"verdict": result["verdict"], "ms": total_ms}})
     return result
 
 
 @app.post("/analyze/video", dependencies=[Secured])
 def analyze_video(req: AnalyzeVideoRequest) -> dict[str, Any]:
-    if not _models_ready():
-        raise HTTPException(status_code=503, detail=REAL_MODE_MESSAGE)
-    try:
-        file = resolve_upload(settings.upload_dir, req.path)
-        validate(file, "video", settings.max_video_mb)
-    except MediaError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if not settings.mock_mode:
+        raise HTTPException(
+            status_code=501, detail="Real video analysis is not implemented yet (Phase 5)."
+        )
+    file = _file(req.path, "video")
     max_frames = settings.max_frames if req.maxFrames is None else req.maxFrames
     with inference_lock:
         start = time.perf_counter()
@@ -142,3 +204,34 @@ def analyze_video(req: AnalyzeVideoRequest) -> dict[str, Any]:
     result["timingsMs"] = {"detect": 0, "beautify": 0, "score": score_ms, "explain": 0}
     log.info("analyze_video", extra={"data": {"verdict": result["verdict"], "ms": score_ms}})
     return result
+
+
+def _require_real_for_filters() -> RealPipeline:
+    if settings.mock_mode:
+        raise HTTPException(
+            status_code=501, detail="Filters need the real pipeline; set MOCK_MODE=false."
+        )
+    return _real()
+
+
+@app.post("/compare", dependencies=[Secured])
+def compare(req: FilterRequest) -> dict[str, Any]:
+    pipeline = _require_real_for_filters()
+    file = _file(req.path, "image")
+    with inference_lock:
+        try:
+            return pipeline.compare(file, req.family, req.strength)
+        except PipelineError as exc:
+            raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
+
+
+@app.post("/beautify", dependencies=[Secured])
+def beautify(req: FilterRequest) -> Response:
+    pipeline = _require_real_for_filters()
+    file = _file(req.path, "image")
+    with inference_lock:
+        try:
+            png = pipeline.beautify(file, req.family, req.strength)
+        except PipelineError as exc:
+            raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
+    return Response(content=png, media_type="image/png")

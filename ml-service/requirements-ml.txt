@@ -1,0 +1,17 @@
+# Real-mode ML stack (CPU wheels). Install on top of requirements.txt.
+# For a CUDA build, install torch/torchvision from the matching PyTorch index instead.
+--extra-index-url https://download.pytorch.org/whl/cpu
+# facenet-pytorch 2.6.0 pins torch 2.2.x, numpy < 2 and pillow < 10.3.
+torch==2.2.2
+torchvision==0.17.2
+numpy<2
+facenet-pytorch==2.6.0
+transformers==4.56.2
+safetensors
+mediapipe
+opencv-python-headless
+scikit-image
+efficientnet_pytorch==0.7.1
+grad-cam
+huggingface_hub
+gdown

@@ -23,10 +23,15 @@ services:
 
   # Private: no published ports. Only the server talks to it.
   ml-service:
-    build: ./ml-service
+    build:
+      context: ./ml-service
+      args:
+        # true installs the real-mode ML stack into the image (see README, "Real mode").
+        WITH_ML: ${WITH_ML:-false}
     restart: unless-stopped
     environment:
       MOCK_MODE: ${MOCK_MODE:-true}
+      DEVICE: ${DEVICE:-auto}
       INTERNAL_SECRET: ${INTERNAL_SECRET:-dev-internal-secret-change-me}
       UPLOAD_DIR: /data/uploads
       WEIGHTS_DIR: /app/weights
@@ -39,6 +44,8 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
+      # Real mode imports PyTorch before it can answer.
+      start_period: 60s
 
   server:
     build: ./server
