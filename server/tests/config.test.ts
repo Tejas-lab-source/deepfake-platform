@@ -73,4 +73,27 @@ describe('config: Phase 4 settings', () => {
     expect(secrets).not.toContain('short'); // too short to scrub safely
     expect(secrets).toContain(cfg.JWT_ACCESS_SECRET);
   });
+
+  it('treats empty variables as unset, so defaults apply instead of 0 or a crash', () => {
+    const cfg = loadConfig({
+      ...base,
+      HIVE_MODE: '',
+      GROQ_MODE: '',
+      HIVE_DAILY_LIMIT: '',
+      HIVE_DEMO_RESERVE: '',
+      GROQ_TEMPERATURE: '',
+      HIVE_API_KEY: '',
+    });
+    expect(cfg).toMatchObject({
+      HIVE_MODE: 'mock',
+      GROQ_MODE: 'mock',
+      HIVE_DAILY_LIMIT: 100,
+      HIVE_DEMO_RESERVE: 20,
+      GROQ_TEMPERATURE: 0.2,
+      HIVE_API_KEY: '',
+    });
+    expect(() =>
+      loadConfig({ NODE_ENV: 'production', JWT_ACCESS_SECRET: '', INTERNAL_SECRET: '' }),
+    ).toThrow(/development default/);
+  });
 });

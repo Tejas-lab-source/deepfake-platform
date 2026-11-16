@@ -81,7 +81,10 @@ export type Config = Omit<Parsed, 'HIVE_MODE' | 'GROQ_MODE' | 'GROQ_MODEL_FALLBA
 };
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
-  const parsed = schema.parse(env);
+  // An empty variable means "not set": Docker Compose passes unset `${VAR:-}` values as "",
+  // which would otherwise become 0 for numbers and fail for enums.
+  const present = Object.fromEntries(Object.entries(env).filter(([, v]) => v !== ''));
+  const parsed = schema.parse(present);
   const fallbackMode: ProviderMode = parsed.MOCK_MODE ? 'mock' : 'real';
   const cfg: Config = {
     ...parsed,
