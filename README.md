@@ -17,7 +17,7 @@ not proof either way.
 |---|---|---|
 | 1 | Compose skeleton, mock mode end to end | Done |
 | 2 | Real ML pipeline (GenD, SBI, filters, Grad-CAM) for images | Done |
-| 3 | Offline training and evaluation scripts | Not started |
+| 3 | Offline training, calibration and evaluation scripts | Done on the fixture; real data awaits Celeb-DF access |
 | 4 | Real Hive and Groq clients | Not started |
 | 5 | Full frontend, video path, PDF report | Not started |
 | 6 | Hardening and CI | Not started |
@@ -27,9 +27,9 @@ scores are repeatable but say nothing about the image.
 
 Real mode (`MOCK_MODE=false`) runs the real image pipeline in the ML service. Still missing
 in real mode: video analysis (Phase 5), the Hive second check and Groq explanations
-(Phase 4), and heatmaps in the UI (Phase 5). There is no trained head or calibration yet
-(Phase 3), so real-mode verdicts use GenD's own logit with **uncalibrated defaults**
-(threshold 0.5, T = 1). Do not read them as results.
+(Phase 4), and heatmaps in the UI (Phase 5). The Phase 3 training scripts exist, but no
+head has been trained on real data, so real-mode verdicts use GenD's own logit with
+**uncalibrated defaults** (threshold 0.5, T = 1). Do not read them as results.
 
 ## Run it
 
@@ -197,13 +197,36 @@ Known limitations:
 - **SBI Grad-CAM is slow** on CPU (about 2.4 s against a 0.1 s forward pass).
 - **No GPU figures.** fp16 on GPU is implemented but has not been run.
 
+## Phase 3: offline training
+
+The scripts in `ml-service/offline/` train the invariance head, calibrate the service and
+evaluate the six head schemes. They are CPU-only and resumable. Full documentation is in
+[ml-service/offline/README.md](ml-service/offline/README.md).
+
+**What has been validated, and what has not:**
+
+| Kind of validation | Status | What it shows |
+|---|---|---|
+| Fixture validation (plumbing) | **Done.** `python -m offline.run_fixture` runs every stage on a generated 20-face fixture in about 5 minutes on CPU | The code runs end to end, files flow between stages, leakage guards hold, the service loads the outputs |
+| Real-data accuracy validation | **Not done.** No Celeb-DF v2 access yet, and real-data split assignment is blocked until the official list's identity graph has been reviewed | Nothing yet: no accuracy, AUC, error rate or success criterion has been measured on real faces |
+
+Fixture numbers (AUC, error rates, criteria marked MET or NOT MET) come from one photo with
+arbitrary labels. They are not accuracy results and must not be reported as such.
+
+- **Protocol label for any future result:** internal identity-disjoint split of the Celeb-DF
+  v2 official test list, not comparable with published benchmark results.
+- **Service safeguards:** the service refuses a `head.pt` that doesn't match
+  `model_card.json`, and refuses fixture or insufficiently validated cards unless
+  `ALLOW_UNVALIDATED_MODEL_CARD=true` (tests only).
+
 ## Development
 
 ```bash
 # ML service (Python 3.11)
 cd ml-service
 python -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
-.venv/bin/pytest && .venv/bin/ruff check . && .venv/bin/black --check . && .venv/bin/mypy app
+.venv/bin/pip install -r requirements-offline.txt   # Phase 3 scripts
+.venv/bin/pytest && .venv/bin/ruff check . && .venv/bin/black --check . && .venv/bin/mypy app offline
 # Tests that need the ML stack or the weights are skipped until both are installed.
 
 # Server (Node 22)

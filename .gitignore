@@ -12,6 +12,8 @@ __pycache__/
 ml-service/weights/*
 !ml-service/weights/.gitkeep
 ml-service/artifacts/
+# Datasets must never be committed.
+ml-service/data/
 uploads/
 *.log
 .DS_Store

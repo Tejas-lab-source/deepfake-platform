@@ -161,6 +161,8 @@ def model_info() -> dict[str, Any]:
         "maxFrames": settings.max_frames,
         "videoTopK": settings.video_top_k,
         "headLoaded": False,
+        "calibrationStatus": calibration.calibration_status,
+        "fixtureModelCard": calibration.fixture,
         "calibration": calibration.to_dict(),
     }
     if state.pipeline is not None:

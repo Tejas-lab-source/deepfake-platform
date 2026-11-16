@@ -62,3 +62,17 @@ def test_uncertain_when_detectors_disagree():
 def test_top_k_mean():
     assert top_k_mean([0.0, 1.0, 2.0, 3.0], 2) == 2.5
     assert top_k_mean([1.0], 5) == 1.0
+
+
+def test_copy_votes_use_the_same_scale_as_the_verdict():
+    """Regression (Phase 3): with non-identity fusion, each copy must vote on the fused,
+    temperature-scaled probability, not on its raw logit."""
+    from app.head import Calibration, FusionWeights
+
+    cal = Calibration(fusion=FusionWeights(bias=3.0), spread_limit=10.0)
+    # Raw logits straddle 0, but after the +3 fusion bias both copies are clearly FAKE.
+    d = decide(cal, {"clean": 0.5, "F1": -0.5}, None, 0.0)
+    assert (d.verdict, d.uncertain_reason) == ("FAKE", None)
+    # Under identity fusion the copies really do disagree, as before.
+    plain = decide(Calibration(spread_limit=10.0), {"clean": 1.5, "F1": -0.2}, None, 0.0)
+    assert plain.uncertain_reason == "variants_disagree"

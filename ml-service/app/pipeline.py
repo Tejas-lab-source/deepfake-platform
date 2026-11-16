@@ -41,7 +41,12 @@ def decide(
     p = probability(cal, fuse(cal, mean_logit, sbi_logit, spread, beautified_likelihood))
     distance = abs(p - cal.threshold)
 
-    votes = {probability(cal, v) >= cal.threshold for v in variant_logits.values()}
+    # Each copy votes on the same scale as the verdict: fused with the face's other inputs,
+    # then temperature-scaled. With identity fusion this is sigmoid(copy_logit / T).
+    votes = {
+        probability(cal, fuse(cal, v, sbi_logit, spread, beautified_likelihood)) >= cal.threshold
+        for v in variant_logits.values()
+    }
     detectors_disagree = False
     if sbi_logit is not None:
         p_head, p_sbi = sigmoid(mean_logit), sigmoid(sbi_logit)
@@ -135,7 +140,7 @@ class RealPipeline:
         from app.detectors.gend import GenDDetector
         from app.detectors.sbi import SBIDetector
         from app.faces import FaceDetector, Landmarker
-        from app.head import LinearHead
+        from app.head import LinearHead, check_model_files
 
         self.settings = settings
         self.cal = calibration
@@ -153,6 +158,13 @@ class RealPipeline:
         else:
             log.warning("SBI weights not found; running without the second detector")
         self.head = LinearHead.load(settings.head_path)
+        check_model_files(calibration, self.head, settings.allow_unvalidated_model_card)
+        if calibration.fixture or calibration.calibration_status not in ("defaults", "ok"):
+            log.warning(
+                "using an unvalidated model card (%s, fixture=%s): results are not meaningful",
+                calibration.calibration_status,
+                calibration.fixture,
+            )
         settings.derived_dir.mkdir(parents=True, exist_ok=True)
 
     def info(self) -> dict[str, Any]:
@@ -162,6 +174,7 @@ class RealPipeline:
             "gend": "yermandy/GenD_CLIP_L_14",
             "sbiLoaded": self.sbi is not None,
             "headLoaded": self.head is not None,
+            "headSha256": None if self.head is None else self.head.sha256,
         }
 
     # ---- helpers ---------------------------------------------------------------------
@@ -325,7 +338,7 @@ class RealPipeline:
                     ]
                     moved = rec["variants"][shifts.index(max(shifts))]
                 batch = [rec["crop"]] + ([moved.image] if moved is not None else [])
-                maps = ex.gradcam_gend(self.gend, batch)
+                maps = ex.gradcam_gend(self.gend, batch, self.head)
                 keys = {"gend": self._save(ex.colourise(maps[0])), "sbi": None}
                 if self.sbi is not None:
                     sbi_map = ex.gradcam_sbi(self.sbi, [rec["crop_sbi"]])[0]
@@ -420,7 +433,7 @@ class RealPipeline:
 
         logits = self._head_logits([crop, variant.image])
         likelihoods = [beautified_likelihood(c, geom) for c in (crop, variant.image)]
-        maps = ex.gradcam_gend(self.gend, [crop, variant.image])
+        maps = ex.gradcam_gend(self.gend, [crop, variant.image], self.head)
         iou = ex.top_region_iou(
             maps[0], self._aligned_heatmap(maps[1], variant), self.settings.heatmap_top_fraction
         )
