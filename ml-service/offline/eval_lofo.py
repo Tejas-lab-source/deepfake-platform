@@ -16,7 +16,9 @@ Metrics, per head (forced decisions: p >= threshold means FAKE):
   fpr_beautified_real  real faces whose held-out-family copies (lo and hi) read FAKE
   fnr_beautified_fake  fake faces whose held-out-family copies read REAL
   flip_rate            held-out copies whose decision differs from the clean decision
-  uncertain_rate       the full UNCERTAIN rule on clean + the 4 inference-style copies
+  uncertain_rate       the full UNCERTAIN rule on clean test inputs, using the fold's copy
+                       set: clean + the two training families (held-out family and mix
+                       excluded). The ablation of the shipped head uses all 4 copies.
   clean_error_forced   error on clean inputs with UNCERTAIN forced to a decision
   f4_*                 the same on F4 copies, when GFPGAN was available
   heatmap_iou          seed 0 only, a sample of test faces (see --iou-faces)
@@ -90,8 +92,13 @@ class Split:
 def head_calibration(
     val: Split, w: NDArray[np.float32], b: float, held_out: str
 ) -> tuple[Any, dict[str, Any]]:
-    """T and threshold on val-B (clean + training-family copies as single inputs), then
-    spread limit and margin by the calibration rules. Identity fusion: LOFO compares heads."""
+    """Fit the fold's parameters on val-B without the held-out family:
+
+    * T and threshold: clean + the two training families' copies, as single inputs;
+    * spread limit and uncertain margin: by the calibration rules, on the fold's copy set
+      (clean + the two training families; see calibrate.face_inputs).
+
+    Identity fusion: LOFO compares heads."""
     from app.head import Calibration
 
     rows = val.subset == "val-B"
@@ -108,7 +115,7 @@ def head_calibration(
     else:
         temperature = cb.fit_temperature(z, y)
         threshold = cb.fit_threshold(cb.sigmoid(z / temperature), y)
-    faces_b = cb.face_inputs(val.data, w, b).take(rows)
+    faces_b = cb.face_inputs(val.data, w, b, exclude_family=held_out).take(rows)
     spread_limit = cb.fit_spread_limit(faces_b.spread) if len(faces_b.y) >= 2 else 1.5
     cal = Calibration(temperature=temperature, threshold=threshold, spread_limit=spread_limit)
     margin, rate, cap_met = cb.fit_margin(cal, faces_b)
@@ -135,7 +142,7 @@ def face_level(
     clean = test.col("clean")
     held = [test.col(c) for c in FAMILY_COPIES[held_out]]
     f4 = test.col("F4") if "F4" in test.names else None
-    inputs = cb.face_inputs(test.data, w, b)
+    inputs = cb.face_inputs(test.data, w, b, exclude_family=held_out)
     uncertain = np.array(
         [
             decide(cal, inputs.variants[i], inputs.sbi[i], float(inputs.bl[i])).verdict

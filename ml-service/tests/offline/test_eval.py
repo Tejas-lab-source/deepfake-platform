@@ -56,19 +56,95 @@ def test_face_level_metrics():
     assert np.isnan(m["f4_fpr_real"])
 
 
-def test_lofo_calibration_ignores_the_held_out_family(cache_dir):
-    """T and threshold must not change when the held-out family's features change."""
+def _gend_head(cache_dir):
+    with np.load(cache_dir / "gend_head.npz") as g:
+        return g["weight"].astype(np.float32), float(g["bias"])
+
+
+def _scramble_family(split, family, seed=0):
+    """Replace every raw feature that involves `family` (its lo/hi copies, and mix copies
+    that contain it) with noise, then refresh the normalised view. Both views must change:
+    some code paths read split.z, others recompute from split.data["feats"]."""
+    from offline.heads import normalize
+
+    rng = np.random.default_rng(seed)
+    feats = split.data["feats"]
+    dim = feats.shape[-1]
+    for name in (f"{family}_lo", f"{family}_hi"):
+        feats[:, split.col(name)] = rng.normal(size=(len(feats), dim)).astype(feats.dtype)
+    touched_mix = 0
+    if "mix" in split.names:
+        j = split.col("mix")
+        for i, plans in enumerate(split.data["plans"]):
+            mix = next(p for p in plans if p["name"] == "mix")
+            if family in {f[0] for f in mix["filters"]}:
+                feats[i, j] = rng.normal(size=dim).astype(feats.dtype)
+                touched_mix += 1
+    split.z = normalize(feats.astype(np.float32))
+    return touched_mix
+
+
+@pytest.mark.parametrize("held_out", ["F1", "F2", "F3"])
+def test_lofo_calibration_never_uses_the_held_out_family(cache_dir, held_out):
+    """Regression (LOFO leakage): no fitted value may change when the held-out family's
+    validation features change: T, threshold, spread limit and uncertain margin."""
     from offline.cache_features import load_split
 
+    w, b = _gend_head(cache_dir)
     val = eval_lofo.Split(load_split(cache_dir, "val", "eval_lofo"))
-    with np.load(cache_dir / "gend_head.npz") as g:
-        w, b = g["weight"].astype(np.float32), float(g["bias"])
-    _, before = eval_lofo.head_calibration(val, w, b, "F2")
-    for name in ("F2_lo", "F2_hi"):
-        val.z[:, val.col(name)] = np.random.default_rng(0).normal(size=val.z[:, 0].shape)
-    _, after = eval_lofo.head_calibration(val, w, b, "F2")
-    assert before["temperature"] == after["temperature"]
-    assert before["threshold"] == after["threshold"]
+    _, before = eval_lofo.head_calibration(val, w, b, held_out)
+    _scramble_family(val, held_out)
+    _, after = eval_lofo.head_calibration(val, w, b, held_out)
+    for key in (
+        "temperature",
+        "threshold",
+        "spread_limit",
+        "uncertain_margin",
+        "val_b_uncertain_rate",
+    ):
+        assert before[key] == after[key], key
+
+
+@pytest.mark.parametrize("held_out", ["F1", "F2", "F3"])
+def test_every_fold_input_excludes_the_held_out_family(cache_dir, monkeypatch, held_out):
+    """Every decision-rule input built for a fold, on val-B (fitting) and on test (the
+    UNCERTAIN rate), must exclude the held-out family. Checked directly, because on the
+    fixture every test face is UNCERTAIN, so comparing outcomes cannot detect a leak."""
+    from offline import calibrate as cb
+    from offline.cache_features import load_split
+
+    calls = []
+    real = cb.face_inputs
+
+    def spy(split, w, b, exclude_family=None):
+        out = real(split, w, b, exclude_family=exclude_family)
+        calls.append((exclude_family, {k for v in out.variants for k in v}))
+        return out
+
+    monkeypatch.setattr(cb, "face_inputs", spy)
+    w, b = _gend_head(cache_dir)
+    val = eval_lofo.Split(load_split(cache_dir, "val", "eval_lofo"))
+    test = eval_lofo.Split(load_split(cache_dir, "test", "eval_lofo"))
+    cal, _ = eval_lofo.head_calibration(val, w, b, held_out)
+    eval_lofo.face_level(test, w, b, cal, held_out)
+    assert len(calls) == 2
+    for excluded, slots in calls:
+        assert excluded == held_out
+        assert held_out not in slots and "mix" not in slots
+
+
+def test_lofo_copy_set_excludes_the_held_out_family(cache_dir):
+    from offline import calibrate as cb
+    from offline.cache_features import load_split
+
+    w, b = _gend_head(cache_dir)
+    val = load_split(cache_dir, "val", "eval_lofo")
+    for held_out in ("F1", "F2", "F3"):
+        inputs = cb.face_inputs(val, w, b, exclude_family=held_out)
+        expected = {"clean"} | {"F1", "F2", "F3"} - {held_out}
+        assert all(set(v) == expected for v in inputs.variants)
+    # The shipped head (no held-out family) keeps the service's 5 copies.
+    assert set(cb.face_inputs(val, w, b).variants[0]) == {"clean", "F1", "F2", "F3", "mix"}
 
 
 def test_fixture_report(eval_report):

@@ -103,3 +103,65 @@ def test_model_card_fields_round_trip(tmp_path):
     assert load_calibration(card).calibration_status == "unknown"
     with pytest.raises(ModelFilesError):
         check_model_files(load_calibration(card), None, False)
+
+
+# ---- the original head mathematics, through a real checkpoint (audit item 3) -------------
+# test_explain.py::test_linear_head_math used to save a 2-value head and load it. A 2-value
+# head is now refused, so the same arithmetic is checked here through a valid 1024-value
+# file: save -> load -> logits.
+
+
+def _padded(*values):
+    w = torch.zeros(1024)
+    w[: len(values)] = torch.tensor(values)
+    return w
+
+
+def _inputs(*rows):
+    x = np.zeros((len(rows), 1024), np.float32)
+    for i, row in enumerate(rows):
+        x[i, : len(row)] = row
+    return x
+
+
+def test_loaded_head_reproduces_the_original_math(tmp_path):
+    path = tmp_path / "head.pt"
+    _save(path, _padded(3.0, 4.0), 0.5)
+    head = LinearHead.load(path)
+    # (3, 4) normalised is (0.6, 0.8): 3*0.6 + 4*0.8 + 0.5 = 5.5, whatever the input's length.
+    assert head.logits(_inputs([3.0, 4.0], [30.0, 40.0])) == pytest.approx([5.5, 5.5])
+
+
+def test_loaded_head_without_normalisation(tmp_path):
+    path = tmp_path / "head.pt"
+    torch.save({"weight": _padded(3.0, 4.0), "bias": 0.5, "l2_normalize": False}, path)
+    head = LinearHead.load(path)
+    assert head.l2_normalize is False
+    # Raw dot products: 3*3 + 4*4 + 0.5 = 25.5 and 3*30 + 4*40 + 0.5 = 250.5.
+    assert head.logits(_inputs([3.0, 4.0], [30.0, 40.0])) == pytest.approx([25.5, 250.5])
+
+
+def test_missing_normalisation_flag_defaults_to_l2(tmp_path):
+    path = tmp_path / "head.pt"
+    torch.save({"weight": _padded(3.0, 4.0), "bias": 0.5}, path)
+    assert LinearHead.load(path).l2_normalize is True
+
+
+def test_metadata_does_not_change_the_head(tmp_path):
+    a, b = tmp_path / "a.pt", tmp_path / "b.pt"
+    _save(a, _padded(1.0, -2.0), 0.25)
+    _save(b, _padded(1.0, -2.0), 0.25, meta={"scheme": "H-f", "lambda_p": 0.3, "seed": 0})
+    ha, hb = LinearHead.load(a), LinearHead.load(b)
+    x = _inputs([1.0, 1.0], [-2.0, 5.0])
+    assert np.array_equal(ha.logits(x), hb.logits(x))
+    assert ha.sha256 != hb.sha256  # different files, so the model card must name the right one
+
+
+def test_trained_head_files_load_in_the_service(tmp_path):
+    """A head written by offline/heads.save_head loads in the service with the same values."""
+    from offline.heads import save_head
+
+    w = np.linspace(-1, 1, 1024, dtype=np.float32)
+    sha = save_head(tmp_path / "head.pt", w, -0.75, {"scheme": "H-f"})
+    head = LinearHead.load(tmp_path / "head.pt")
+    assert np.array_equal(head.weight, w) and head.bias == -0.75 and head.sha256 == sha

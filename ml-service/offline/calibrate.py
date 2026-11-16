@@ -84,18 +84,35 @@ class FaceInputs:
         return np.column_stack([self.m1, sbi, self.spread, self.bl]).astype(np.float64)
 
 
-def face_inputs(split: dict[str, Any], w: NDArray[np.float32], b: float) -> FaceInputs:
+def face_inputs(
+    split: dict[str, Any],
+    w: NDArray[np.float32],
+    b: float,
+    exclude_family: str | None = None,
+) -> FaceInputs:
+    """Per-face inputs to the decision rule.
+
+    exclude_family=None (the shipped head): the service's clean + 4 copies (F1, F2, F3, mix).
+    exclude_family="F2" (a LOFO fold): clean + the two training families' copies only. The
+    held-out family's copy is dropped, and so is mix, which may contain it; keeping mix only
+    when it avoids the held-out family would give faces different copy counts. No fitted
+    value of the fold can then depend on the held-out family.
+    """
     names = split["copy_names"]
     logits = normalize(split["feats"].astype(np.float32)) @ w + b  # (N, C)
+    families = [f for f in ("F1", "F2", "F3") if f != exclude_family]
     variants = []
     for i, pick in enumerate(split["inference_pick"]):
-        slots = {"clean": "clean", **{f: pick[f] for f in ("F1", "F2", "F3")}, "mix": "mix"}
+        slots = {"clean": "clean", **{f: pick[f] for f in families}}
+        if exclude_family is None:
+            slots["mix"] = "mix"
         variants.append({slot: float(logits[i, names.index(c)]) for slot, c in slots.items()})
     m1 = np.array([np.mean(list(v.values())) for v in variants])
     spread = np.array([max(v.values()) - min(v.values()) for v in variants])
     sbi = [None if not np.isfinite(s) else float(s) for s in split["sbi"]]
     bl = np.nan_to_num(split["bl"].astype(np.float64), nan=0.0)  # service: `likelihood or 0.0`
-    assert tuple(variants[0]) == ("clean", *INFERENCE_SLOTS)
+    if exclude_family is None and variants:
+        assert tuple(variants[0]) == ("clean", *INFERENCE_SLOTS)
     return FaceInputs(split["video_id"], split["subset"], split["y"], variants, m1, spread, sbi, bl)
 
 

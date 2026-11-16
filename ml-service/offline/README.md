@@ -95,9 +95,14 @@ Exactly as defined in `CLAUDE.md` §5 item 3; see `schemes.py`.
 - Three folds each hold out one of F1–F3; F4 is always held out. Three seeds.
 - **H-b's F1 fold is NOT HELD OUT** (its bilateral copy is part of F1) and is excluded from
   aggregate results.
-- H-a has no training, so its three seeds are identical. With very few training faces (the
-  fixture), H-f's seeds are also identical, because hardest-of-K has no randomness and all
-  faces fit in one batch.
+- **Seeds.** Each seed sets the batch order and, for H-b to H-e, the random copy choice.
+  H-a has no training, so its three seeds are identical. H-f's hardest-of-K is an argmax,
+  so its only randomness is the batch order. When all training faces fit in one batch (the
+  fixture: 8 faces, batch 64), every seed makes the same choices, and the heads differ only
+  by floating-point rounding (at most 1.8e-7 per weight on the fixture). With real data
+  (thousands of faces, batches of 64) the seed changes which faces share each step, so H-f's
+  seeds genuinely differ. Tests check both cases, and that the same seed reproduces a head
+  bit for bit.
 - **Shipped head:** H-f on all of F1–F3, seed 0. λp is chosen from {0, 0.1, 0.3, 1, 3, 10}:
   the lowest val-A flip rate among values keeping val-A clean AUC within 1 point of H-a.
   If that rule can't be applied, λp = 1.0 and the reason is recorded.
@@ -156,10 +161,19 @@ Decisions are forced (p ≥ threshold is FAKE).
 | `fpr_beautified_real` | Real faces' held-out-family copies (lo and hi) predicted FAKE |
 | `fnr_beautified_fake` | Fake faces' held-out-family copies predicted REAL |
 | `flip_rate` | Held-out copies whose decision differs from the clean decision |
-| `uncertain_rate` | Full UNCERTAIN rule on clean + the 4 inference-style copies |
+| `uncertain_rate` | Full UNCERTAIN rule on clean test inputs, using the fold's copy set (see below) |
 | `clean_error_forced` | Clean error with UNCERTAIN forced to a decision |
 | `f4_*` | The same on F4 copies, when available |
 | Heatmap IoU | Seed 0, top 20% regions, clean vs held-out `_hi` copy, F3 warped back; `--iou-faces 100` for real data |
+
+**No parameter of a fold sees the held-out family.** Each fold's copy set for the
+UNCERTAIN rule is clean + the two training families. The held-out family's copy is dropped,
+and so is `mix`, which may contain it. Temperature, threshold, spread limit and uncertain
+margin are all fitted on val-B with that set, and the test UNCERTAIN rate uses it too. The
+held-out family is used only to measure FPR, FNR, flip rate and heatmap IoU. The shipped
+head has no held-out family, so its calibration and ablation use the service's full
+5-copy set. Regression tests scramble the held-out family's features and check that no
+fitted value changes.
 
 Results are given as seed mean ± std, with a 95% bootstrap CI that resamples whole test
 videos. The run also produces the inference-time ablation of the shipped head on clean test

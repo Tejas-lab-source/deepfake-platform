@@ -203,11 +203,16 @@ The scripts in `ml-service/offline/` train the invariance head, calibrate the se
 evaluate the six head schemes. They are CPU-only and resumable. Full documentation is in
 [ml-service/offline/README.md](ml-service/offline/README.md).
 
-- **Fixture only so far.** `python -m offline.run_fixture` runs every stage on a generated
-  20-face fixture in about 5 minutes on CPU. Its numbers are plumbing tests, not accuracy
-  results.
-- **No real-data result exists.** The project has no Celeb-DF v2 access yet, and real-data
-  split assignment is blocked until the official list's identity graph has been reviewed.
+**What has been validated, and what has not:**
+
+| Kind of validation | Status | What it shows |
+|---|---|---|
+| Fixture validation (plumbing) | **Done.** `python -m offline.run_fixture` runs every stage on a generated 20-face fixture in about 5 minutes on CPU | The code runs end to end, files flow between stages, leakage guards hold, the service loads the outputs |
+| Real-data accuracy validation | **Not done.** No Celeb-DF v2 access yet, and real-data split assignment is blocked until the official list's identity graph has been reviewed | Nothing yet: no accuracy, AUC, error rate or success criterion has been measured on real faces |
+
+Fixture numbers (AUC, error rates, criteria marked MET or NOT MET) come from one photo with
+arbitrary labels. They are not accuracy results and must not be reported as such.
+
 - **Protocol label for any future result:** internal identity-disjoint split of the Celeb-DF
   v2 official test list, not comparable with published benchmark results.
 - **Service safeguards:** the service refuses a `head.pt` that doesn't match

@@ -116,3 +116,98 @@ def test_rerun_skips_finished_heads(heads_dir, cache_dir):
 @pytest.mark.parametrize("lam", [0.0, 10.0])
 def test_lambda_grid_covers_the_spec_default(lam):
     assert lam in train_head.LAMBDA_GRID and 1.0 in train_head.LAMBDA_GRID
+
+
+# ---- reproducibility (audit item 2) -------------------------------------------------------
+
+REPRO = train_head.TrainConfig(epochs=8, batch_size=32, lr=1e-2, patience=1000)
+
+
+def _run(scheme, seed, n, distinct=False):
+    data, _, _ = _synthetic(n=n, seed=3)
+    if distinct:  # give every copy its own direction, so hardest-of-K is a real choice
+        noise = np.random.default_rng(7).normal(0, 0.05, data.z.shape).astype(np.float32)
+        noise[:, 0] = 0.0  # keep the clean view unchanged
+        data = train_head.Data(data.names, normalize(data.z + noise), data.present, data.y)
+    if distinct:  # a non-zero start, like GenD's head: copies then score differently
+        w0 = np.random.default_rng(11).normal(0, 1.0, 1024).astype(np.float32)
+    else:
+        w0 = np.zeros(1024, np.float32)
+    w, b, _ = train_head.train_one(SCHEMES[scheme], "F1", seed, 1.0, data, data, w0, 0.0, REPRO)
+    return w, b
+
+
+@pytest.mark.parametrize("scheme", ["H-c", "H-e", "H-f"])
+def test_same_seed_gives_bitwise_identical_heads(scheme):
+    w1, b1 = _run(scheme, 0, 200)
+    w2, b2 = _run(scheme, 0, 200)
+    assert np.array_equal(w1, w2) and b1 == b2
+
+
+def test_hf_seeds_differ_when_there_is_more_than_one_batch():
+    """H-f's only randomness is the batch order (hardest-of-K is an argmax). With 200 faces
+    in batches of 32, different seeds give different orders and different heads."""
+    w0, _ = _run("H-f", 0, 200)
+    w1, _ = _run("H-f", 1, 200)
+    w2, _ = _run("H-f", 2, 200)
+    assert not np.array_equal(w0, w1) and not np.array_equal(w1, w2)
+
+
+def _choices(monkeypatch, scheme, seed, n):
+    """Per step: the sorted (clean logit, chosen copy) pairs. A face is identified by its
+    clean logit, which is unique here and identical across seeds while the weights are."""
+    steps = []
+    real = train_head.select_copies
+
+    def spy(selection, clean, cand, avail, rng):
+        picks = real(selection, clean, cand, avail, rng)
+        steps.append(sorted(zip(np.round(clean, 6).tolist(), picks.tolist(), strict=True)))
+        return picks
+
+    monkeypatch.setattr(train_head, "select_copies", spy)
+    _run(scheme, seed, n, distinct=True)
+    monkeypatch.undo()
+    return steps
+
+
+def test_hf_seed_changes_no_choice_when_everything_fits_in_one_batch(monkeypatch):
+    """Why the fixture's H-f seeds came out (almost) identical: with every face in one batch,
+    the seed only reorders the faces inside the batch. Each step uses the same faces and
+    the same hardest copy per face, whatever the seed. The heads then differ only by
+    floating-point rounding (summation order), which Adam can amplify a little: 1.8e-7 per
+    weight on the fixture. With several batches (real data) the seed changes which faces
+    share a step, so the heads genuinely differ (see the test above)."""
+    a = _choices(monkeypatch, "H-f", 0, 20)  # 20 faces < batch size 32: one batch
+    b = _choices(monkeypatch, "H-f", 1, 20)
+    assert len(a) == len(b) == REPRO.epochs
+    # Step 1 starts from the same weights, so the per-face choices are exactly equal, and
+    # they are real choices: different faces pick different copies.
+    assert a[0] == b[0]
+    assert len({pick for _, pick in a[0]}) > 1
+    # H-c draws its copy at random, so its seeds choose differently from the first step.
+    c0 = _choices(monkeypatch, "H-c", 0, 20)
+    c1 = _choices(monkeypatch, "H-c", 1, 20)
+    assert c0[0] != c1[0]
+
+
+def test_random_selection_schemes_differ_by_seed_even_in_one_batch():
+    w0, _ = _run("H-c", 0, 20)
+    w1, _ = _run("H-c", 1, 20)
+    assert not np.allclose(w0, w1)
+
+
+def test_hardest_of_k_is_recomputed_under_the_current_head(monkeypatch):
+    """The hardest copy is chosen per batch with the current weights, not fixed up front."""
+    seen = []
+    real = train_head.select_copies
+
+    def spy(selection, clean, cand, avail, rng):
+        out = real(selection, clean, cand, avail, rng)
+        seen.append((selection, cand.copy()))
+        return out
+
+    monkeypatch.setattr(train_head, "select_copies", spy)
+    _run("H-f", 0, 64)
+    assert all(sel == "hardest" for sel, _ in seen) and len(seen) >= 4
+    # The same batch's candidate logits change across epochs as the head learns.
+    assert not np.allclose(seen[0][1], seen[-2][1])
