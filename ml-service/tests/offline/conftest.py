@@ -42,3 +42,21 @@ def cache_dir(faces_dir, tmp_path_factory):
     args = ["--faces", str(faces_dir), "--out", str(out), "--weights-dir", str(WEIGHTS)]
     assert cache_features.main(args) == 0
     return out
+
+
+@pytest.fixture(scope="session")
+def heads_dir(cache_dir, tmp_path_factory):
+    from offline import train_head
+
+    out = tmp_path_factory.mktemp("heads")
+    args = [
+        "--cache",
+        str(cache_dir),
+        "--out-dir",
+        str(out),
+        "--final",
+        "--final-out",
+        str(out / "weights" / "head.pt"),
+    ]
+    assert train_head.main(args) == 0
+    return out
