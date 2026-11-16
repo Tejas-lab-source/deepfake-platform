@@ -33,7 +33,7 @@ follow_imports = "skip"
 
 # The ML libraries above are untyped (or skipped), so values that come from them are Any.
 [[tool.mypy.overrides]]
-module = ["app.*"]
+module = ["app.*", "offline.*"]
 warn_return_any = false
 disallow_subclassing_any = false
 disallow_untyped_decorators = false
