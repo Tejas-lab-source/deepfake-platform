@@ -70,6 +70,18 @@ const externalCheckSchema = new Schema(
     verdict: { type: String, enum: ['FAKE', 'REAL', null], default: null },
     latencyMs: { type: Number, default: null },
     rawResponse: { type: Schema.Types.Mixed, default: null },
+    // Phase 4: why no scores were produced (not_configured, budget:user_limit, auth, ...).
+    reason: { type: String, default: null },
+    // Phase 4: per-frame scores (video); deepfakeScore/aiGeneratedScore are their maxima.
+    frames: {
+      type: [
+        new Schema(
+          { frameIndex: Number, timestamp: Number, deepfake: Number, aiGenerated: Number },
+          { _id: false },
+        ),
+      ],
+      default: [],
+    },
   },
   { timestamps: true },
 );

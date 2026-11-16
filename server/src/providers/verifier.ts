@@ -39,6 +39,7 @@ export async function verifyWithTimeout(
   verifier: Verifier,
   filePath: string,
   ms: number,
+  options?: VerifyOptions,
 ): Promise<VerifierResult> {
   let timer: NodeJS.Timeout | undefined;
   const timeout = new Promise<VerifierResult>((resolve) => {
@@ -49,11 +50,12 @@ export async function verifyWithTimeout(
   });
   try {
     return await Promise.race([
-      verifier.verify(filePath).catch((err: unknown): VerifierResult => ({
+      verifier.verify(filePath, options).catch((): VerifierResult => ({
         status: 'error',
         deepfakeScore: null,
         aiGeneratedScore: null,
-        raw: { error: err instanceof Error ? err.message : String(err) },
+        raw: null,
+        reason: 'client_error',
       })),
       timeout,
     ]);
