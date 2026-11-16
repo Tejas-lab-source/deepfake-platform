@@ -1,0 +1,23 @@
+{
+  "_note": "SYNTHETIC test data for the M7 Groq check. Not from any real analysis, person or file.",
+  "input": {
+    "final": { "verdict": "FAKE", "badge": "second_check_disagrees" },
+    "ours": {
+      "verdict": "FAKE",
+      "probability": 0.87,
+      "threshold": 0.5,
+      "confident": true,
+      "uncertainReason": null,
+      "spread": 0.42
+    },
+    "external": { "status": "ok", "deepfakeScore": 0.12, "threshold": 0.9, "verdict": "REAL" },
+    "mock": false
+  },
+  "extras": {
+    "ruleApplied": "ours_confident_fake_external_disagrees",
+    "detectorScores": { "gendHead": 1.9, "sbi": 1.4 },
+    "aiGeneratedScore": 0.03,
+    "provider": "hive",
+    "modelCardVersion": "synthetic-m7"
+  }
+}
