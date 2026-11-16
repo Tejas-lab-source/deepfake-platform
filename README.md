@@ -93,7 +93,9 @@ room per analysis, and the UI also polls as a fallback.
    checksum, so this only tells you whether you have the same file. Despite its name it is
    a PyTorch checkpoint (a zip container), not a tar. It is loaded with `weights_only=True`.
 
-3. Run with Docker (builds a larger image, about 2.5 GB):
+3. Run with Docker (builds a larger image, about 2.5 GB). **This real-mode image has not been
+   built or run yet** (see "Phase 2 validation" below); the direct command after it is the
+   verified path.
 
    ```bash
    MOCK_MODE=false WITH_ML=true docker compose up --build
@@ -164,6 +166,36 @@ Full pipeline (ms):
 | GenD + SBI | 0 | on | 4139 | 52 | 15 | 571 | 3500 |
 | GenD + SBI | 4 | off | 2567 | 51 | 293 | 2223 | 0 |
 | GenD + SBI | 4 | on | 7408 | 49 | 285 | 2241 | 4832 |
+
+### Phase 2 validation
+
+Run on a 4-core CPU VM with the real `yermandy/GenD_CLIP_L_14` and SBI FF++ c23 weights
+loaded, the ML service started directly (not in Docker).
+
+| Check | Result |
+|---|---|
+| ML service pytest | 59 passed, 0 skipped |
+| Same suite without the ML stack installed | 17 passed, 3 files skipped (before the last 3 SBI tests were added) |
+| black, ruff, mypy | Clean |
+| Server tests (16, of which 13 cover the reconciler) and type-check | Passed |
+| GenD wrapper against GenD's original code, same 4 images | Identical logits |
+| SBI checkpoint through the `weights_only=True` loader | Strict key match, finite scores |
+| Upload to verdict to explanation through the Node API, 6 images | All completed, both heatmaps written |
+
+Known limitations:
+
+- **Real-mode Docker image: pending.** `WITH_ML=true` has never been built successfully. The
+  system package names in `ml-service/Dockerfile` are untested.
+- **F4 (GFPGAN): pending.** The wrapper was checked against GFPGAN 1.3.8's source but never run.
+- **Uncalibrated.** No trained head or model card exists, so verdicts use GenD's own logit at
+  threshold 0.5, and SBI only acts through the detectors-disagree rule.
+- **Images only.** Real video analysis returns 501 until Phase 5; heatmaps are written to the
+  upload volume but not shown in the UI yet.
+- **GenD is sensitive to the filters.** On the three real faces tried, smoothing and makeup
+  copies moved GenD's logit far toward "fake"; the pipeline returned UNCERTAIN for them. That
+  is a handful of images, not an evaluation.
+- **SBI Grad-CAM is slow** on CPU (about 2.4 s against a 0.1 s forward pass).
+- **No GPU figures.** fp16 on GPU is implemented but has not been run.
 
 ## Development
 
