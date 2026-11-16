@@ -21,6 +21,10 @@
  *   - One request per service: no retries, one Groq model.
  *   - Repeat runs: refused while an earlier live report or run marker exists, unless
  *     --allow-repeat is given. Earlier reports are never overwritten or deleted.
+ *   - The live gate (M7_LIVE=1 and a real mode) is enforced inside runCheck() too, so a
+ *     direct import cannot bypass it, and the real network re-checks M7_LIVE on every call.
+ *   - Credentials: a key required by a real mode must be set before anything starts (no
+ *     run marker, no budget reservation, no request). Errors name variables, never values.
  */
 import { mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -108,11 +112,39 @@ export function syntheticResult(): { input: ExplanationInput; extras: Record<str
 
 export function liveAllowed(argv: string[], env: NodeJS.ProcessEnv): { ok: boolean; why: string } {
   if (!argv.includes('--live')) return { ok: false, why: 'dry run (no --live flag)' };
+  const envGate = liveEnvAllowed(env);
+  if (!envGate.ok) return envGate;
+  return { ok: true, why: 'live run approved by flag and M7_LIVE=1' };
+}
+
+/** The environment half of the gate, checked again inside runCheck() for every live run. */
+export function liveEnvAllowed(env: NodeJS.ProcessEnv): { ok: boolean; why: string } {
   if (env.M7_LIVE !== '1') return { ok: false, why: 'M7_LIVE is not 1' };
   if (env.HIVE_MODE !== 'real' && env.GROQ_MODE !== 'real') {
     return { ok: false, why: 'neither HIVE_MODE nor GROQ_MODE is real' };
   }
-  return { ok: true, why: 'live run approved by flag and M7_LIVE=1' };
+  return { ok: true, why: 'M7_LIVE=1 and a real mode' };
+}
+
+export class LiveRunRefused extends Error {}
+
+/** Names (never values) of the keys a live run needs but does not have. A placeholder is
+ * accepted: in the cloud sandbox the proxy injects the real key. */
+export function missingCredentials(env: NodeJS.ProcessEnv): string[] {
+  const missing: string[] = [];
+  if (env.HIVE_MODE === 'real' && !(env.HIVE_API_KEY ?? '').trim()) missing.push('HIVE_API_KEY');
+  if (env.GROQ_MODE === 'real' && !(env.GROQ_API_KEY ?? '').trim()) missing.push('GROQ_API_KEY');
+  return missing;
+}
+
+/** The real network, usable only while M7_LIVE=1: re-checked on every call. */
+function realNetwork(env: NodeJS.ProcessEnv): FetchLike {
+  return (url, init) => {
+    if (env.M7_LIVE !== '1') {
+      return Promise.reject(new LiveRunRefused('M7_LIVE is not 1; real request refused'));
+    }
+    return fetch(url, init);
+  };
 }
 
 // ---- destinations ----------------------------------------------------------------------
@@ -299,9 +331,15 @@ export async function runCheck(opts: RunOptions): Promise<Record<string, unknown
   const guardEvents: GuardEvent[] = [];
   let ownedRedis: Redis | null = null;
 
-  // Live-only checks, all before any network or Redis use.
+  // Live-only checks, all before any marker, budget, Redis or network use.
   let destinations = { hiveUrl: HIVE_URL, groqBase: GROQ_BASE_URL };
   if (opts.live) {
+    const gate = liveEnvAllowed(env);
+    if (!gate.ok) throw new LiveRunRefused(gate.why);
+    const missing = missingCredentials(env);
+    if (missing.length > 0) {
+      throw new LiveRunRefused(`required credential not set: ${missing.join(', ')}`);
+    }
     const earlier = previousLiveRuns(out);
     if (earlier.length > 0 && !opts.allowRepeat) {
       throw new RepeatRunRefused(
@@ -310,7 +348,7 @@ export async function runCheck(opts: RunOptions): Promise<Record<string, unknown
     }
     destinations = liveDestinations(env);
   }
-  const network = opts.live ? (opts.fetchImpl ?? ((u, i) => fetch(u, i))) : dryRunFetch(recorded);
+  const network = opts.live ? (opts.fetchImpl ?? realNetwork(env)) : dryRunFetch(recorded);
   const fetchImpl = guardedFetch(network, guardEvents);
 
   mkdirSync(out, { recursive: true });
@@ -491,7 +529,11 @@ async function main(): Promise<void> {
     });
     console.log(JSON.stringify(report, null, 2));
   } catch (err) {
-    if (err instanceof RepeatRunRefused || err instanceof DestinationRefused) {
+    if (
+      err instanceof RepeatRunRefused ||
+      err instanceof DestinationRefused ||
+      err instanceof LiveRunRefused
+    ) {
       console.error(`Refusing to make live calls: ${err.message}.`);
       process.exitCode = 2;
       return;
