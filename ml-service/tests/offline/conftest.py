@@ -81,3 +81,35 @@ def card_path(heads_dir, cache_dir):
     ]
     assert calibrate.main(args) == 0
     return out
+
+
+@pytest.fixture(scope="session")
+def eval_report(card_path, heads_dir, cache_dir, faces_dir, tmp_path_factory):
+    import json
+
+    from offline import eval_lofo
+    from tests.conftest import WEIGHTS
+
+    out = tmp_path_factory.mktemp("eval") / "lofo.json"
+    args = [
+        "--cache",
+        str(cache_dir),
+        "--heads-dir",
+        str(heads_dir),
+        "--final-head",
+        str(heads_dir / "weights" / "head.pt"),
+        "--model-card",
+        str(card_path),
+        "--faces",
+        str(faces_dir),
+        "--weights-dir",
+        str(WEIGHTS),
+        "--out",
+        str(out),
+        "--iou-faces",
+        "1",
+        "--bootstrap",
+        "50",
+    ]
+    assert eval_lofo.main(args) == 0
+    return json.loads(out.read_text())
