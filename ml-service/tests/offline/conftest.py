@@ -60,3 +60,24 @@ def heads_dir(cache_dir, tmp_path_factory):
     ]
     assert train_head.main(args) == 0
     return out
+
+
+@pytest.fixture(scope="session")
+def card_path(heads_dir, cache_dir):
+    from offline import calibrate
+
+    out = heads_dir / "weights" / "model_card.json"
+    args = [
+        "--cache",
+        str(cache_dir),
+        "--head",
+        str(heads_dir / "weights" / "head.pt"),
+        "--head-report",
+        str(heads_dir / "final.json"),
+        "--out",
+        str(out),
+        "--bootstrap",
+        "50",
+    ]
+    assert calibrate.main(args) == 0
+    return out

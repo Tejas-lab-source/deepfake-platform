@@ -26,7 +26,7 @@ pythonpath = ["."]
 [[tool.mypy.overrides]]
 module = [
   "cv2.*", "mediapipe.*", "skimage.*", "facenet_pytorch.*", "pytorch_grad_cam.*",
-  "efficientnet_pytorch.*", "transformers.*", "safetensors.*", "gfpgan.*", "torch.*", "PIL.*",
+  "efficientnet_pytorch.*", "transformers.*", "sklearn.*", "safetensors.*", "gfpgan.*", "torch.*", "PIL.*",
 ]
 ignore_missing_imports = true
 follow_imports = "skip"
