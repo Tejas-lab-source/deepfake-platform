@@ -1,0 +1,17 @@
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+ml-service/weights/*
+!ml-service/weights/.gitkeep
+ml-service/artifacts/
+uploads/
+*.log
+.DS_Store

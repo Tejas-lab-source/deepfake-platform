@@ -1,0 +1,5 @@
+weights/
+artifacts/
+tests/
+**/__pycache__/
+.venv/

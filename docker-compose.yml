@@ -1,0 +1,94 @@
+name: deepfake-platform
+
+services:
+  mongo:
+    image: mongo:7
+    restart: unless-stopped
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # Private: no published ports. Only the server talks to it.
+  ml-service:
+    build: ./ml-service
+    restart: unless-stopped
+    environment:
+      MOCK_MODE: ${MOCK_MODE:-true}
+      INTERNAL_SECRET: ${INTERNAL_SECRET:-dev-internal-secret-change-me}
+      UPLOAD_DIR: /data/uploads
+      WEIGHTS_DIR: /app/weights
+      K: ${K:-4}
+    volumes:
+      - uploads:/data/uploads
+      - ./ml-service/weights:/app/weights
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  server:
+    build: ./server
+    restart: unless-stopped
+    depends_on:
+      mongo: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      ml-service: { condition: service_healthy }
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      PORT: 4000
+      MOCK_MODE: ${MOCK_MODE:-true}
+      MONGO_URL: mongodb://mongo:27017/deepfake
+      REDIS_URL: redis://redis:6379
+      ML_SERVICE_URL: http://ml-service:8000
+      INTERNAL_SECRET: ${INTERNAL_SECRET:-dev-internal-secret-change-me}
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:-dev-access-secret-change-me}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:-dev-refresh-secret-change-me}
+      UPLOAD_DIR: /data/uploads
+      MEDIA_TTL_HOURS: ${MEDIA_TTL_HOURS:-24}
+      K: ${K:-4}
+      HIVE_API_KEY: ${HIVE_API_KEY:-}
+      HIVE_THRESHOLD: ${HIVE_THRESHOLD:-0.9}
+      HIVE_TIMEOUT_MS: ${HIVE_TIMEOUT_MS:-15000}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      GROQ_MODEL_EXPLAIN: ${GROQ_MODEL_EXPLAIN:-openai/gpt-oss-120b}
+      GROQ_MODEL_CHAT: ${GROQ_MODEL_CHAT:-openai/gpt-oss-20b}
+    volumes:
+      - uploads:/data/uploads
+    ports:
+      - "${SERVER_PORT:-4000}:4000"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:4000/api/v1/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  web:
+    build: ./web
+    restart: unless-stopped
+    depends_on:
+      server: { condition: service_healthy }
+    ports:
+      - "${WEB_PORT:-8080}:80"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:80/"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  mongo-data:
+  uploads:
