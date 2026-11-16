@@ -1,0 +1,6 @@
+# Base runtime (mock mode). The heavy ML stack (torch etc.) is added in Phase 2.
+fastapi>=0.115,<1
+uvicorn[standard]>=0.30,<1
+pydantic>=2.7,<3
+pydantic-settings>=2.3,<3
+pillow>=10,<13
