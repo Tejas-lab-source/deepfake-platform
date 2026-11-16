@@ -50,3 +50,74 @@ def fixture_list_text() -> str:
 
 def is_fixture(root: Path) -> bool:
     return (root / MARKER).is_file()
+
+
+FRAME_SIZE = 320
+
+
+def _variant_frame(base: object, variant: int, frame: int) -> object:
+    """One RGB frame of a fixture video: the astronaut photo, shifted, scaled, flipped and
+    colour-shifted by `variant`, with a small per-frame jitter."""
+    import cv2
+    import numpy as np
+
+    img = np.asarray(base)
+    rng = np.random.default_rng(1000 * variant + frame)
+    zoom = 0.75 + 0.05 * (variant % 4)
+    side = int(min(img.shape[:2]) * zoom)
+    # The astronaut's face is in the upper-middle of the photo; keep it inside the crop.
+    x0 = int(150 - (side - 220) / 2 + rng.integers(-6, 7))
+    y0 = int(40 + rng.integers(-6, 7))
+    x0 = int(np.clip(x0, 0, img.shape[1] - side))
+    y0 = int(np.clip(y0, 0, img.shape[0] - side))
+    crop = img[y0 : y0 + side, x0 : x0 + side]
+    if variant % 2:
+        crop = crop[:, ::-1]
+    out = cv2.resize(np.ascontiguousarray(crop), (FRAME_SIZE, FRAME_SIZE))
+    hsv = cv2.cvtColor(out, cv2.COLOR_RGB2HSV).astype(np.int16)
+    hsv[..., 0] = (hsv[..., 0] + 7 * variant) % 180
+    hsv[..., 2] = np.clip(hsv[..., 2] + 4 * (variant % 3) - 4, 0, 255)
+    return cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2RGB)
+
+
+def write_fixture(root: Path) -> list[Path]:
+    """Generate the fixture under `root`: the marker, the test list and the videos."""
+    import cv2
+    import numpy as np
+    from skimage import data
+
+    base = data.astronaut()
+    root.mkdir(parents=True, exist_ok=True)
+    (root / MARKER).write_text(MARKER_TEXT)
+    (root / "List_of_testing_videos.txt").write_text(fixture_list_text())
+    written = []
+    for video in fixture_videos():
+        path = root / video.path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        writer = cv2.VideoWriter(
+            str(path), cv2.VideoWriter.fourcc(*"mp4v"), 5.0, (FRAME_SIZE, FRAME_SIZE)
+        )
+        if not writer.isOpened():
+            raise RuntimeError(f"OpenCV cannot write MP4 files here ({path})")
+        frames = [_variant_frame(base, video.variant, i) for i in range(video.face_frames)]
+        frames += [np.full((FRAME_SIZE, FRAME_SIZE, 3), 90, np.uint8)] * video.blank_frames
+        for rgb in frames:
+            writer.write(np.ascontiguousarray(np.asarray(rgb)[..., ::-1]))
+        writer.release()
+        written.append(path)
+    return written
+
+
+def main(argv: list[str] | None = None) -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Generate the plumbing fixture dataset.")
+    parser.add_argument("--out", type=Path, required=True)
+    args = parser.parse_args(argv)
+    paths = write_fixture(args.out)
+    print(f"wrote {len(paths)} fixture videos to {args.out} ({MARKER})")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
