@@ -246,7 +246,17 @@ export default function ResultView({
         {preview && !isVideo && (
           <img src={preview} alt="Your upload" className="mb-4 max-h-56 rounded" />
         )}
-        <FaceGallery analysisId={analysis.id} faces={faces} mock={mock} />
+        {faces.length === 0 && isVideo ? (
+          <p className="text-sm text-slate-600">
+            {mock
+              ? 'Mock mode has no face boxes, scores per face or heatmaps; see the timeline for the frames.'
+              : (ml?.framesScored ?? 0) === 0
+                ? 'No face was detected in any sampled frame, so nothing was scored.'
+                : 'No face details are available for this video.'}
+          </p>
+        ) : (
+          <FaceGallery analysisId={analysis.id} faces={faces} mock={mock} />
+        )}
       </section>
 
       <section className={card}>

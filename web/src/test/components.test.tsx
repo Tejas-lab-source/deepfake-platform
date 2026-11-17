@@ -160,6 +160,13 @@ describe('ResultView', () => {
     );
   });
 
+  it('explains why a mock video has no face details instead of saying no face was found', () => {
+    const v = videoAnalysis();
+    inRouter(<ResultView analysis={{ ...v, ml: { ...v.ml!, mock: true } }} />);
+    expect(screen.getByText(/Mock mode has no face boxes/)).toBeInTheDocument();
+    expect(screen.queryByText('No face was detected.')).not.toBeInTheDocument();
+  });
+
   it('labels mock results as placeholders', () => {
     inRouter(<ResultView analysis={imageAnalysis({ ml: { mock: true, faces: [] } })} />);
     expect(screen.getByText(/Mock mode: the scores are placeholders/)).toBeInTheDocument();
