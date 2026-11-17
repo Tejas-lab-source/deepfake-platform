@@ -165,7 +165,7 @@ describe('GET /analyses/:id/report.pdf', () => {
       `Analysis ID: ${analysis.id}`,
       'FAKE: signs of manipulation were found',
       'Verification badge: single_check',
-      'Rule applied: external_unavailable_or_opted_out',
+      'Rule applied: external_unavailable:opted_out',
       'Probability of manipulation: 91.0%',
       'Decision threshold: 50.0%',
       'Model card version: mc-test',

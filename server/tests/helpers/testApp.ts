@@ -143,7 +143,7 @@ export async function seedFinished(
   await ctx.repos.analyses.update(a.id, {
     status: opts.status ?? 'done',
     stage: opts.status === 'processing' ? 'scoring' : 'done',
-    final: { verdict, badge: 'single_check', ruleApplied: 'external_unavailable_or_opted_out' },
+    final: { verdict, badge: 'single_check', ruleApplied: 'external_unavailable:opted_out' },
     ours: {
       verdict,
       probability,
