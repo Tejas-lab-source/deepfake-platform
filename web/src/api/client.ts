@@ -1,4 +1,13 @@
-import type { Analysis, Session } from './types';
+import type {
+  Analysis,
+  AnalysisListItem,
+  AskResponse,
+  Comparison,
+  EvalReport,
+  ModelCard,
+  Page,
+  Session,
+} from './types';
 
 const BASE = '/api/v1';
 const STORAGE_KEY = 'deepfake.session';
@@ -44,19 +53,27 @@ export function onSessionChange(fn: (s: Session | null) => void): () => void {
   return () => listeners.delete(fn);
 }
 
+function problemMessage(status: number, body: unknown): string {
+  const problem = body as { detail?: string; title?: string } | null;
+  return problem?.detail ?? problem?.title ?? `HTTP ${status}`;
+}
+
 async function parse<T>(res: Response): Promise<T> {
   const text = await res.text();
-  const body: unknown = text ? JSON.parse(text) : null;
-  if (!res.ok) {
-    const problem = body as { detail?: string; title?: string } | null;
-    throw new ApiError(res.status, problem?.detail ?? problem?.title ?? `HTTP ${res.status}`);
+  let body: unknown = null;
+  try {
+    body = text ? JSON.parse(text) : null;
+  } catch {
+    body = null;
   }
+  if (!res.ok) throw new ApiError(res.status, problemMessage(res.status, body));
   return body as T;
 }
 
 let refreshing: Promise<boolean> | null = null;
 
-function refresh(): Promise<boolean> {
+/** Exchange the refresh token for new tokens; signs out when that is no longer possible. */
+export function refresh(): Promise<boolean> {
   refreshing ??= (async () => {
     try {
       if (!session) return false;
@@ -76,8 +93,8 @@ function refresh(): Promise<boolean> {
   return refreshing;
 }
 
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const send = (): Promise<Response> =>
+async function send(path: string, init: RequestInit = {}): Promise<Response> {
+  const go = (): Promise<Response> =>
     fetch(BASE + path, {
       ...init,
       headers: {
@@ -85,16 +102,60 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
         ...(session ? { authorization: `Bearer ${session.accessToken}` } : {}),
       },
     });
-  let res = await send();
-  if (res.status === 401 && session && (await refresh())) res = await send();
-  return parse<T>(res);
+  let res = await go();
+  if (res.status === 401 && session && (await refresh())) res = await go();
+  return res;
 }
 
-const json = (body: unknown): RequestInit => ({
-  method: 'POST',
+const request = async <T>(path: string, init: RequestInit = {}): Promise<T> =>
+  parse<T>(await send(path, init));
+
+async function blob(path: string): Promise<Blob> {
+  const res = await send(path);
+  if (!res.ok) await parse(res);
+  return res.blob();
+}
+
+const json = (body: unknown, method = 'POST'): RequestInit => ({
+  method,
   headers: { 'content-type': 'application/json' },
   body: JSON.stringify(body),
 });
+
+/** Multipart upload with progress (fetch cannot report upload progress). */
+function uploadWithProgress(
+  form: FormData,
+  onProgress?: (fraction: number) => void,
+): Promise<{ analysisId: string; jobId: string; duplicate?: boolean }> {
+  const attempt = (): Promise<{ status: number; body: unknown }> =>
+    new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', `${BASE}/analyses`);
+      if (session) xhr.setRequestHeader('authorization', `Bearer ${session.accessToken}`);
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable && onProgress) onProgress(e.loaded / e.total);
+      };
+      xhr.onload = () => {
+        let body: unknown = null;
+        try {
+          body = xhr.responseText ? JSON.parse(xhr.responseText) : null;
+        } catch {
+          body = null;
+        }
+        resolve({ status: xhr.status, body });
+      };
+      xhr.onerror = () =>
+        reject(new ApiError(0, 'Network error: the upload did not reach the server.'));
+      xhr.send(form);
+    });
+  return (async () => {
+    let r = await attempt();
+    if (r.status === 401 && session && (await refresh())) r = await attempt();
+    if (r.status < 200 || r.status >= 300)
+      throw new ApiError(r.status, problemMessage(r.status, r.body));
+    return r.body as { analysisId: string; jobId: string; duplicate?: boolean };
+  })();
+}
 
 export const api = {
   async authenticate(mode: 'login' | 'register', email: string, password: string): Promise<void> {
@@ -103,14 +164,38 @@ export const api = {
     );
   },
   health: () => request<{ status: string; mockMode: boolean }>('/health'),
-  createAnalysis(file: File, externalCheck: boolean) {
+  createAnalysis(file: File, externalCheck: boolean, onProgress?: (fraction: number) => void) {
     const form = new FormData();
-    form.append('file', file);
     form.append('externalCheck', String(externalCheck));
-    return request<{ analysisId: string; jobId: string }>('/analyses', {
-      method: 'POST',
-      body: form,
-    });
+    form.append('file', file);
+    return uploadWithProgress(form, onProgress);
   },
   getAnalysis: (id: string) => request<Analysis>(`/analyses/${id}`),
+  listAnalyses: (page: number, limit = 10) =>
+    request<Page<AnalysisListItem>>(`/analyses?page=${page}&limit=${limit}`),
+  async deleteAnalysis(id: string): Promise<void> {
+    const res = await send(`/analyses/${id}`, { method: 'DELETE' });
+    if (!res.ok) await parse(res);
+  },
+  /** A derived image (heatmap, crop) of an analysis, as a Blob (needs the auth header). */
+  image: (id: string, key: string) =>
+    blob(`/analyses/${id}/heatmaps/${encodeURIComponent(key.replace(/^derived\//, ''))}`),
+  report: (id: string) => blob(`/analyses/${id}/report.pdf`),
+  ask: (id: string, question: string) =>
+    request<AskResponse>(`/analyses/${id}/ask`, json({ question })),
+  compare: (id: string, family: string, strength: number) =>
+    request<Comparison>(`/analyses/${id}/compare`, json({ family, strength })),
+  comparisons: (id: string) => request<{ items: Comparison[] }>(`/analyses/${id}/comparisons`),
+  modelCard: () => request<ModelCard>('/model-card'),
+  evalRuns: () => request<{ report: EvalReport | null }>('/eval-runs'),
 };
+
+/** Save a Blob as a file download. */
+export function saveBlob(data: Blob, filename: string): void {
+  const url = URL.createObjectURL(data);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
