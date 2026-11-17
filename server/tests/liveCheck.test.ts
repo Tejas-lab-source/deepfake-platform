@@ -14,7 +14,9 @@ import {
   HIVE_URL,
   liveAllowed,
   liveDestinations,
+  LiveRunRefused,
   M7_BUDGET_USER,
+  missingCredentials,
   RepeatRunRefused,
   runCheck,
   syntheticPng,
@@ -245,6 +247,97 @@ describe('destination allowlist', () => {
     expect(JSON.stringify(report)).not.toContain(HIVE_KEY);
     expect(JSON.stringify(report)).not.toContain(GROQ_KEY);
   });
+});
+
+// ---- live gate and credentials inside runCheck (no Redis needed) ---------------------------
+
+/** A budget that records reservations; it must never be touched by a refused run. */
+const spyBudget = () => {
+  const reserve = vi.fn(async () => ({ allowed: true }));
+  return { budget: { reserve } as unknown as DailyBudget, reserve };
+};
+
+/** Replaces the real fetch for the test, so even a regression can never reach the network. */
+const blockRealFetch = () =>
+  vi
+    .spyOn(globalThis, 'fetch')
+    .mockImplementation(() => Promise.reject(new Error('real network is blocked in tests')));
+
+describe('live gate inside runCheck (direct calls cannot bypass it)', () => {
+  it.each([
+    ['M7_LIVE missing', { M7_LIVE: undefined }],
+    ['M7_LIVE=0', { M7_LIVE: '0' }],
+    ['M7_LIVE=true', { M7_LIVE: 'true' }],
+    ['no real mode', { HIVE_MODE: 'mock', GROQ_MODE: 'off' }],
+  ])('refuses runCheck({live:true}) with %s: no request, marker or budget', async (_n, over) => {
+    const env = { ...liveEnv(), ...over } as NodeJS.ProcessEnv;
+    const realFetch = blockRealFetch();
+    const { budget, reserve } = spyBudget();
+    const out = outDir();
+    try {
+      // No fetchImpl: this is the path that would use the real network.
+      await expect(runCheck({ live: true, env, outDir: out, budget })).rejects.toThrow(
+        LiveRunRefused,
+      );
+      // An injected network is not reached either.
+      const { fetchImpl, calls } = fakeNetwork();
+      await expect(runCheck({ live: true, env, fetchImpl, outDir: out, budget })).rejects.toThrow(
+        LiveRunRefused,
+      );
+      expect(calls).toHaveLength(0);
+      expect(realFetch).not.toHaveBeenCalled();
+    } finally {
+      realFetch.mockRestore();
+    }
+    expect(reserve).not.toHaveBeenCalled();
+    expect(readdirSync(out)).toEqual([]);
+  });
+
+  it('keeps the dry run working without M7_LIVE', async () => {
+    const realFetch = blockRealFetch();
+    try {
+      const report = await runCheck({ live: false, env: {}, outDir: outDir() });
+      expect(report.mode).toMatch(/^DRY RUN/);
+      expect(report.groq).toMatchObject({ status: 'ok' });
+      expect(realFetch).not.toHaveBeenCalled();
+    } finally {
+      realFetch.mockRestore();
+    }
+  });
+});
+
+describe('credentials are checked before anything is consumed', () => {
+  it('names missing keys only for the services in real mode', () => {
+    expect(missingCredentials(liveEnv())).toEqual([]);
+    expect(missingCredentials(liveEnv({ HIVE_API_KEY: '' }))).toEqual(['HIVE_API_KEY']);
+    expect(missingCredentials(liveEnv({ GROQ_API_KEY: '   ' }))).toEqual(['GROQ_API_KEY']);
+    expect(missingCredentials(liveEnv({ HIVE_MODE: 'off', HIVE_API_KEY: '' }))).toEqual([]);
+    expect(missingCredentials(liveEnv({ HIVE_API_KEY: 'placeholder' }))).toEqual([]);
+  });
+
+  it.each([
+    ['Hive', { HIVE_API_KEY: '' }, 'HIVE_API_KEY', GROQ_KEY],
+    ['Hive (whitespace)', { HIVE_API_KEY: '  ' }, 'HIVE_API_KEY', GROQ_KEY],
+    ['Groq', { GROQ_API_KEY: '' }, 'GROQ_API_KEY', HIVE_KEY],
+    ['Groq (Groq-only run)', { HIVE_MODE: 'off', GROQ_API_KEY: '' }, 'GROQ_API_KEY', HIVE_KEY],
+  ])(
+    'a missing %s key: no request, no marker, no budget, no key value in the error',
+    async (_n, over, name, otherKey) => {
+      const env = liveEnv(over as Record<string, string>);
+      const { fetchImpl, calls } = fakeNetwork();
+      const { budget, reserve } = spyBudget();
+      const out = outDir();
+      const err = await runCheck({ live: true, env, fetchImpl, outDir: out, budget }).catch(
+        (e: unknown) => e,
+      );
+      expect(err).toBeInstanceOf(LiveRunRefused);
+      expect((err as Error).message).toContain(name);
+      expect((err as Error).message).not.toContain(otherKey);
+      expect(calls).toHaveLength(0);
+      expect(reserve).not.toHaveBeenCalled();
+      expect(readdirSync(out)).toEqual([]);
+    },
+  );
 });
 
 // ---- 2. Hive budget ----------------------------------------------------------------------

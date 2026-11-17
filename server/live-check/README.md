@@ -20,7 +20,8 @@ At most **one billed request per service**: no retries and a single Groq model.
 
 | Safeguard | Behaviour |
 |---|---|
-| Live gate | Needs both `--live` and `M7_LIVE=1`; otherwise only a dry run is possible |
+| Live gate | Needs both `--live` and `M7_LIVE=1`; otherwise only a dry run is possible. `runCheck()` enforces `M7_LIVE=1` itself, so importing the script cannot bypass the gate, and the real network re-checks it on every request |
+| Credentials | A key required by a service in `real` mode must be set (a placeholder is fine in the sandbox) before anything starts: otherwise no run marker, no budget reservation and no request. Errors name the variable, never its value |
 | Destinations | Only `https://api.thehive.ai/api/v3/hive/ai-generated-and-deepfake-content-detection` and `https://api.groq.com/openai/v1/chat/completions`: HTTPS, default port, no credentials or query in the URL. A custom `HIVE_API_URL` or `GROQ_BASE_URL` is refused before anything starts, and every request is checked again just before sending |
 | Redirects | Never followed (`redirect: manual`); any 3xx answer is refused, so the authorization header cannot reach another host |
 | Hive budget | One unit is reserved in the app's Redis daily Hive budget (same code and limits as the app, demo pool, identity `m7-live-check`) before the Hive request. Denied, or Redis unreachable: nothing is sent. Never refunded, even after a timeout. A Hive 429 marks the day exhausted, as in the app |
