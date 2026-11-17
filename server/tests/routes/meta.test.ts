@@ -93,3 +93,48 @@ describe('unknown routes', () => {
     await request(ctx.app).get('/api/v1/nope').set(auth).expect(404);
   });
 });
+
+describe('hardening', () => {
+  it('answers malformed and oversized JSON with 4xx problem+json, not 500', async () => {
+    const ctx = testApp();
+    const bad = await request(ctx.app)
+      .post('/api/v1/auth/login')
+      .set('content-type', 'application/json')
+      .send('{"email": ')
+      .expect(400);
+    expect(bad.headers['content-type']).toMatch(/problem\+json/);
+    expect(bad.body.detail).toBe('The request body is not valid JSON.');
+    await request(ctx.app)
+      .post('/api/v1/auth/login')
+      .set('content-type', 'application/json')
+      .send(JSON.stringify({ email: 'x'.repeat(200_000) }))
+      .expect(413);
+  });
+
+  it('sends security headers and no CORS headers by default', async () => {
+    const ctx = testApp();
+    const res = await request(ctx.app)
+      .get('/api/v1/health')
+      .set('Origin', 'https://evil.example')
+      .expect(200);
+    expect(res.headers).toMatchObject({
+      'x-content-type-options': 'nosniff',
+      'x-frame-options': 'DENY',
+      'referrer-policy': 'no-referrer',
+      'cache-control': 'no-store',
+    });
+    expect(res.headers['content-security-policy']).toContain("default-src 'none'");
+    expect(res.headers['access-control-allow-origin']).toBeUndefined();
+    expect(res.headers['x-powered-by']).toBeUndefined();
+  });
+
+  it('allows only the configured CORS origins', async () => {
+    const ctx = testApp({ corsOrigins: ['https://app.example'] });
+    const ok = await request(ctx.app).get('/api/v1/health').set('Origin', 'https://app.example');
+    expect(ok.headers['access-control-allow-origin']).toBe('https://app.example');
+    const other = await request(ctx.app)
+      .get('/api/v1/health')
+      .set('Origin', 'https://evil.example');
+    expect(other.headers['access-control-allow-origin']).toBeUndefined();
+  });
+});

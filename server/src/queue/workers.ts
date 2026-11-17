@@ -28,6 +28,7 @@ import type { FileStore } from '../storage.js';
 import {
   failAnalysis,
   PermanentJobError,
+  TransientJobError,
   processAnalysis,
   processExplanation,
   setStage,
@@ -176,7 +177,11 @@ const step =
       await fn(d, job.data.analysisId);
     } catch (err) {
       if (err instanceof PermanentJobError) throw new UnrecoverableError(err.message);
-      throw err;
+      if (err instanceof TransientJobError) throw err;
+      // Anything else is internal (database, Redis, a bug): log it in full, but never show its
+      // message to the user, who gets a generic one.
+      logger.error({ err, analysisId: job.data.analysisId }, 'unexpected job error');
+      throw new Error('Processing failed because of an internal error.');
     }
   };
 

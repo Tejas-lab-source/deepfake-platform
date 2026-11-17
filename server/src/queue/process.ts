@@ -56,6 +56,9 @@ export interface ProcessDeps {
 /** A failure that retrying cannot fix (bad media, expired upload, unsupported request). */
 export class PermanentJobError extends Error {}
 
+/** A failure a retry may fix (ML service restarting); its message is safe to show users. */
+export class TransientJobError extends Error {}
+
 const statusOf = (stage: Stage): AnalysisRecord['status'] =>
   stage === 'done'
     ? 'done'
@@ -175,7 +178,7 @@ export async function processAnalysis(d: ProcessDeps, analysisId: string): Promi
   } catch (err) {
     await externalPromise; // never leave the second check running unobserved
     const { permanent, message } = classifyMlError(err);
-    throw permanent ? new PermanentJobError(message) : new Error(message);
+    throw permanent ? new PermanentJobError(message) : new TransientJobError(message);
   } finally {
     stopWatching();
   }
