@@ -4,3 +4,7 @@ uvicorn[standard]>=0.30,<1
 pydantic>=2.7,<3
 pydantic-settings>=2.3,<3
 pillow>=10,<13
+# Video decoding (frame sampling and timestamps) in mock and real mode. numpy < 2 matches
+# the ML stack's pin (facenet-pytorch 2.6.0).
+numpy<2
+opencv-python-headless

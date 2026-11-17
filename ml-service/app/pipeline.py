@@ -96,6 +96,7 @@ if TYPE_CHECKING:
     from app.beautify import Variant
     from app.config import Settings
     from app.faces import DetectedFace, FaceGeometry
+    from app.progress import ProgressFn
 
 log = logging.getLogger("ml-service.pipeline")
 
@@ -201,15 +202,23 @@ class RealPipeline:
         Image.fromarray(image).save(self.settings.derived_dir / name)
         return f"derived/{name}"
 
-    def _rng(self, path: Path, face_index: int) -> np.random.Generator:
-        """Seeded from the file contents, so the same upload gives the same copies."""
-        import numpy as np
-
+    @staticmethod
+    def _digest(path: Path) -> bytes:
         h = hashlib.sha256()
         with path.open("rb") as fh:
             for chunk in iter(lambda: fh.read(1 << 20), b""):
                 h.update(chunk)
-        return np.random.default_rng([int.from_bytes(h.digest()[:8], "big"), face_index])
+        return h.digest()
+
+    @staticmethod
+    def _rng_from(digest: bytes, face_index: int) -> np.random.Generator:
+        import numpy as np
+
+        return np.random.default_rng([int.from_bytes(digest[:8], "big"), face_index])
+
+    def _rng(self, path: Path, face_index: int) -> np.random.Generator:
+        """Seeded from the file contents, so the same upload gives the same copies."""
+        return self._rng_from(self._digest(path), face_index)
 
     def _crops(self, image: NDArray[np.uint8], face: DetectedFace) -> tuple[Any, Any]:
         from app.faces import gend_crop, sbi_crop
@@ -238,7 +247,31 @@ class RealPipeline:
 
     # ---- /analyze/image ----------------------------------------------------------------
 
-    def analyze_image(self, path: Path, k: int, explain: bool) -> dict[str, Any]:
+    def analyze_image(
+        self, path: Path, k: int, explain: bool, progress: ProgressFn | None = None
+    ) -> dict[str, Any]:
+        t0 = time.perf_counter()
+        if progress is not None:
+            progress("detecting_faces", 0, 1, "images")
+        image, scale = self._load(path)
+        return self._analyze_rgb(
+            image, scale, self._digest(path), k, explain, progress, time.perf_counter() - t0
+        )
+
+    def _analyze_rgb(
+        self,
+        image: NDArray[np.uint8],
+        scale: float,
+        digest: bytes,
+        k: int,
+        explain: bool,
+        progress: ProgressFn | None = None,
+        load_s: float = 0.0,
+    ) -> dict[str, Any]:
+        """Steps 2-10 on one RGB image (an image upload or one video frame).
+
+        `digest` seeds the beautified copies, so the same input always gives the same copies.
+        """
         from app import beautify
         from app import explain as ex
 
@@ -246,9 +279,8 @@ class RealPipeline:
         timings = {"detect": 0.0, "beautify": 0.0, "score": 0.0, "explain": 0.0}
 
         t0 = time.perf_counter()
-        image, scale = self._load(path)
         detected = self.detector.detect(image)[: s.max_faces]
-        timings["detect"] = time.perf_counter() - t0
+        timings["detect"] = load_s + time.perf_counter() - t0
 
         base: dict[str, Any] = {"threshold": cal.threshold, "modelCardVersion": cal.version}
         if not detected:
@@ -265,12 +297,14 @@ class RealPipeline:
 
         records: list[dict[str, Any]] = []
         for index, face in enumerate(detected):
+            if progress is not None:
+                progress("scoring", index, len(detected), "faces")
             t0 = time.perf_counter()
             crop, crop_sbi = self._crops(image, face)
             geom = self.landmarker.geometry(crop)
             variants: list[Variant] = []
             if geom is not None and k > 0:
-                rng = self._rng(path, index)
+                rng = self._rng_from(digest, index)
                 variants = beautify.make_variants(
                     crop, geom, k, rng, (s.strength_min, s.strength_max)
                 )
@@ -328,7 +362,10 @@ class RealPipeline:
 
         if explain:
             t0 = time.perf_counter()
-            for rec in records[: s.max_explain_faces]:
+            explained = records[: s.max_explain_faces]
+            if progress is not None:
+                progress("aggregating", 0, len(explained), "heatmaps")
+            for rec in explained:
                 # Compare the clean heatmap with the copy whose logit moved most.
                 clean_logit = rec["variant_logits"]["clean"]
                 moved: Variant | None = None
@@ -364,6 +401,131 @@ class RealPipeline:
             "confident": top.confident,
             "uncertainReason": top.uncertain_reason,
             "faces": [r["out"] for r in records],
+            "timingsMs": {name: round(v * 1000) for name, v in timings.items()},
+        }
+
+    # ---- /analyze/video ------------------------------------------------------------------
+
+    def analyze_video(
+        self,
+        path: Path,
+        k: int,
+        max_frames: int,
+        top_k: int,
+        explain: bool = True,
+        progress: ProgressFn | None = None,
+    ) -> dict[str, Any]:
+        """Score evenly sampled frames with the image pipeline and aggregate them.
+
+        Frames without a face are kept in the timeline but excluded from the verdict. Only
+        the most and the least suspicious frames get heatmaps (Grad-CAM is the slow step).
+        """
+        from app import video as vid
+        from app.media import MediaError
+
+        s, cal = self.settings, self.cal
+        report = progress or (lambda _st, _d, _t, _u: None)
+        timings = {"decode": 0.0, "detect": 0.0, "beautify": 0.0, "score": 0.0, "explain": 0.0}
+
+        t0 = time.perf_counter()
+        report("detecting_faces", 0, 1, "videos")
+        info = vid.probe(path, s.max_video_decode_frames)
+        indices = vid.sample_indices(info.frame_count, max_frames)
+        timings["decode"] += time.perf_counter() - t0
+        report("extracting_frames", 0, len(indices), "frames")
+
+        digest = self._digest(path)
+        frames: dict[int, dict[str, Any]] = {}
+        images: dict[int, NDArray[np.uint8]] = {}
+        best: tuple[float, int] | None = None
+        worst: tuple[float, int] | None = None
+        t_decode = time.perf_counter()
+        for n, (index, rgb) in enumerate(vid.read_frames(path, indices, s.max_image_side)):
+            timings["decode"] += time.perf_counter() - t_decode
+            report("scoring", n, len(indices), "frames")
+            frame_digest = hashlib.sha256(digest + index.to_bytes(8, "big")).digest()
+            r = self._analyze_rgb(rgb, 1.0, frame_digest, k, False)
+            for name in ("detect", "beautify", "score"):
+                timings[name] += r["timingsMs"][name] / 1000.0
+            entry: dict[str, Any] = {
+                "index": index,
+                "timestamp": vid.timestamp(index, info.fps),
+                "decoded": True,
+                "hasFace": bool(r["faces"]),
+                "faceCount": len(r["faces"]),
+                "logit": None,
+                "sbi": None,
+                "beautifiedLikelihood": None,
+                "probability": r["probability"],
+                "verdict": r["verdict"],
+                "uncertainReason": r["uncertainReason"],
+                "box": None,
+                "explained": False,
+            }
+            if r["faces"]:
+                top_face = r["faces"][0]
+                logit = float(top_face["scores"]["gendHead"])
+                entry.update(
+                    logit=logit,
+                    sbi=top_face["scores"]["sbi"],
+                    beautifiedLikelihood=top_face["beautifiedLikelihood"],
+                    box=top_face["box"],
+                )
+                if best is None or logit > best[0]:
+                    best = (logit, index)
+                if worst is None or logit < worst[0]:
+                    worst = (logit, index)
+                # Keep only the (at most two) frames that may be explained in memory.
+                images[index] = rgb
+                keep = {best[1], worst[1]}
+                for stale in [i for i in images if i not in keep]:
+                    del images[stale]
+            frames[index] = entry
+            t_decode = time.perf_counter()
+        report("scoring", len(frames), len(indices), "frames")
+
+        if not frames:
+            raise MediaError("no frame of the video could be decoded")
+        # Sampled frames that did not decode are shown as gaps, never scored.
+        timeline = [
+            frames.get(i)
+            or {
+                "index": i,
+                "timestamp": vid.timestamp(i, info.fps),
+                "decoded": False,
+                "hasFace": False,
+                "faceCount": 0,
+                "logit": None,
+                "probability": None,
+                "verdict": None,
+                "explained": False,
+            }
+            for i in indices
+        ]
+        result = vid.aggregate_frames(timeline, cal, top_k)
+
+        faces: list[dict[str, Any]] = []
+        if explain and best is not None and worst is not None:
+            t0 = time.perf_counter()
+            targets = [best[1]] if best[1] == worst[1] else [best[1], worst[1]]
+            report("aggregating", 0, len(targets), "frames")
+            for n, index in enumerate(targets):
+                frame_digest = hashlib.sha256(digest + index.to_bytes(8, "big")).digest()
+                r = self._analyze_rgb(images[index], 1.0, frame_digest, k, True)
+                frames[index]["explained"] = True
+                frames[index]["faces"] = r["faces"]
+                if index == best[1]:
+                    faces = r["faces"]
+                report("aggregating", n + 1, len(targets), "frames")
+            timings["explain"] = time.perf_counter() - t0
+
+        return {
+            **result,
+            "kind": "video",
+            "video": {**info.to_dict(), "sampledFrames": len(indices)},
+            "frames": timeline,
+            "faces": faces,
+            "modelCardVersion": cal.version,
             "timingsMs": {name: round(v * 1000) for name, v in timings.items()},
         }
 

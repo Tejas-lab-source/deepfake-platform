@@ -44,13 +44,31 @@ function verify(token: string, secret: string, typ: Claims['typ']): AuthUser | n
 
 export const verifyAccessToken = (token: string): AuthUser | null =>
   verify(token, config.JWT_ACCESS_SECRET, 'access');
+
+/** Like verifyAccessToken, but says why a token was refused (for clear client errors). */
+export function checkAccessToken(
+  token: unknown,
+): { ok: true; user: AuthUser } | { ok: false; reason: 'missing' | 'expired' | 'invalid' } {
+  if (typeof token !== 'string' || token.length === 0) return { ok: false, reason: 'missing' };
+  try {
+    const claims = jwt.verify(token, config.JWT_ACCESS_SECRET, { algorithms: ['HS256'] }) as Claims;
+    if (claims.typ !== 'access') return { ok: false, reason: 'invalid' };
+    return { ok: true, user: { id: claims.sub, role: claims.role } };
+  } catch (err) {
+    return { ok: false, reason: err instanceof jwt.TokenExpiredError ? 'expired' : 'invalid' };
+  }
+}
 export const verifyRefreshToken = (token: string): AuthUser | null =>
   verify(token, config.JWT_REFRESH_SECRET, 'refresh');
 
 export const requireAuth: RequestHandler = (req, _res, next) => {
   const header = req.headers.authorization;
-  const user = header?.startsWith('Bearer ') ? verifyAccessToken(header.slice(7)) : null;
-  if (!user) return next(new HttpProblem(401, 'Unauthorized', 'Missing or invalid access token'));
-  req.user = user;
+  const check = checkAccessToken(header?.startsWith('Bearer ') ? header.slice(7) : undefined);
+  if (!check.ok) {
+    const detail =
+      check.reason === 'expired' ? 'Access token expired' : 'Missing or invalid access token';
+    return next(new HttpProblem(401, 'Unauthorized', detail));
+  }
+  req.user = check.user;
   next();
 };

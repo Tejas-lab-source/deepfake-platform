@@ -1,24 +1,40 @@
-import { Worker, type Job } from 'bullmq';
+/**
+ * BullMQ wiring for the analysis and explanation jobs. The job logic is in process.ts; this
+ * file builds its production dependencies (MongoDB, Redis budgets, Hive/Groq clients chosen by
+ * HIVE_MODE/GROQ_MODE) and maps failures onto bounded retries:
+ *   - PermanentJobError (bad media, expired upload, unsupported) fails at once;
+ *   - anything else is retried up to JOB_ATTEMPTS times with backoff, then fails.
+ * A failure is only recorded on the analysis when no retry is left.
+ */
+import { UnrecoverableError, Worker, type Job } from 'bullmq';
+import { Redis } from 'ioredis';
+import { DailyBudget, InflightLock } from '../budget.js';
 import { config } from '../config.js';
+import type { Repos } from '../data/types.js';
 import { explainResult, type ExplainerDeps, type StoredExplanation } from '../explain/explainer.js';
 import { GROQ_PROMPT_VERSION } from '../explain/prompt.js';
 import { logger } from '../logger.js';
-import { storagePath } from '../middleware/upload.js';
-import { Analysis, Explanation, ExternalCheck, Media, User } from '../models/index.js';
-import { Redis } from 'ioredis';
-import { DailyBudget, InflightLock } from '../budget.js';
-import { GroqClient } from '../providers/groq.js';
-import { HiveVerifier } from '../providers/hive.js';
-import { MockHiveVerifier } from '../providers/hiveMock.js';
+import { ExternalCheck } from '../models/index.js';
 import {
   safeExternalCheck,
   type CheckStore,
   type ExternalCheckDeps,
 } from '../providers/externalCheck.js';
-import { analyzeMedia } from '../providers/mlClient.js';
-import { reconcile, type ExternalStatus } from '../reconcile.js';
-import { emitProgress } from '../sockets.js';
-import type { Stage } from '../types.js';
+import { GroqClient } from '../providers/groq.js';
+import { HiveVerifier } from '../providers/hive.js';
+import { MockHiveVerifier } from '../providers/hiveMock.js';
+import type { MlApi } from '../providers/mlClient.js';
+import type { FileStore } from '../storage.js';
+import {
+  failAnalysis,
+  PermanentJobError,
+  TransientJobError,
+  processAnalysis,
+  processExplanation,
+  setStage,
+  type ProcessDeps,
+  type ProgressEvent,
+} from './process.js';
 import {
   ANALYSIS_QUEUE,
   EXPLAIN_QUEUE,
@@ -48,8 +64,7 @@ function sharedBudgetRedis(): Redis {
 
 let externalDeps: ExternalCheckDeps | null = null;
 
-/** Built on first use from HIVE_MODE: mock (free, no network), real (Hive v3, budgeted) or
- * off. The budget's Redis client fails fast, so a Redis outage cannot hang a job. */
+/** Built on first use from HIVE_MODE: mock (free, no network), real (Hive v3, budgeted) or off. */
 function externalCheckDeps(): ExternalCheckDeps {
   if (externalDeps) return externalDeps;
   const redis = sharedBudgetRedis();
@@ -82,17 +97,13 @@ function externalCheckDeps(): ExternalCheckDeps {
   return externalDeps;
 }
 
-let explainerDeps: ExplainerDeps | null = null;
-
-/** Built on first use from GROQ_MODE: real (Groq, budgeted, validated), or mock/off, which
- * both use the template explanation. */
-function explanationDeps(): ExplainerDeps {
-  if (explainerDeps) return explainerDeps;
+/** Built from GROQ_MODE: real (Groq, budgeted, validated), or mock/off: the template. */
+function explanationDeps(repos: Repos): ExplainerDeps {
   const models = [config.GROQ_MODEL_EXPLAIN, ...config.GROQ_MODEL_FALLBACKS].filter(
     (m, i, all) => all.indexOf(m) === i,
   );
   const real = config.GROQ_MODE === 'real';
-  explainerDeps = {
+  return {
     mode: config.GROQ_MODE,
     models,
     groq: real
@@ -116,169 +127,101 @@ function explanationDeps(): ExplainerDeps {
       : null,
     cache: {
       find: async (sha) =>
-        (await Explanation.findOne({
-          inputSha256: sha,
-          fallbackUsed: false,
-          promptVersion: GROQ_PROMPT_VERSION,
-        })
-          .sort({ createdAt: -1 })
-          .select('-_id -analysisId -createdAt -updatedAt -__v')
-          .lean()) as StoredExplanation | null,
+        (await repos.explanations.findCachedGroq(
+          sha,
+          GROQ_PROMPT_VERSION,
+        )) as StoredExplanation | null,
     },
   };
-  return explainerDeps;
 }
 
-async function setStage(analysisId: string, stage: Stage): Promise<void> {
-  const status = stage === 'done' ? 'done' : stage === 'failed' ? 'failed' : 'processing';
-  await Analysis.updateOne({ _id: analysisId }, { stage, status });
-  emitProgress({ analysisId, stage });
+export interface WorkerWiring {
+  repos: Repos;
+  files: FileStore;
+  ml: MlApi;
+  emit: (event: ProgressEvent) => void;
 }
 
-async function runAnalysis(job: Job<AnalysisJob>): Promise<void> {
-  const { analysisId } = job.data;
-  const analysis = await Analysis.findById(analysisId);
-  if (!analysis) return; // deleted while queued
-  const media = await Media.findById(analysis.mediaId);
-  if (!media) throw new Error('The uploaded file has expired or was deleted.');
-
-  await setStage(analysisId, 'detecting_faces');
-  // Our pipeline and the second opinion run in parallel.
-  const mlPromise = analyzeMedia(media.kind, media.storageKey);
-  // The second check only runs with the uploader's explicit consent for this upload.
-  const consent = analysis.externalCheckRequested === true;
-  const externalPromise = consent
-    ? (async () => {
-        const owner = await User.findById(analysis.ownerId).select('role').lean();
-        return safeExternalCheck(
-          externalCheckDeps(),
-          {
-            sha256: media.sha256,
-            filePath: storagePath(media.storageKey),
-            mime: media.mime,
-            userId: String(analysis.ownerId),
-            demo: owner?.role === 'admin',
-            consent,
-          },
-          (err) => logger.warn({ err, analysisId }, 'external check failed'),
-        );
-      })().catch((err: unknown) => {
-        logger.warn({ err, analysisId }, 'external check failed');
-        return null;
-      })
-    : Promise.resolve(null);
-  await setStage(analysisId, 'scoring');
-  const ml = await mlPromise;
-
-  await setStage(analysisId, 'verifying');
-  const external = await externalPromise;
-  const externalStatus: ExternalStatus = !analysis.externalCheckRequested
-    ? 'opted_out'
-    : (external?.status ?? 'error');
-  const final = reconcile({
-    ours: { verdict: ml.verdict, confident: ml.confident },
-    external: { status: externalStatus, deepfakeScore: external?.deepfakeScore ?? null },
+export function productionProcessDeps(w: WorkerWiring): ProcessDeps {
+  const explainer = explanationDeps(w.repos);
+  return {
+    repos: w.repos,
+    files: w.files,
+    ml: w.ml,
+    emit: w.emit,
     hiveThreshold: config.HIVE_THRESHOLD,
-  });
-
-  const face = ml.faces?.[0];
-  await Analysis.updateOne(
-    { _id: analysisId },
-    {
-      final: { verdict: final.verdict, badge: final.badge, ruleApplied: final.ruleApplied },
-      ours: {
-        verdict: ml.verdict,
-        probability: ml.probability,
-        threshold: ml.threshold,
-        confident: ml.confident,
-        uncertainReason: ml.uncertainReason,
-        detectorScores: face?.scores ?? null,
-        spread: face?.spread ?? null,
-      },
-      externalCheckId: external?._id ?? null,
-      faces: ml.faces ?? [],
-      frames: ml.frames ?? [],
-      modelCardVersion: ml.modelCardVersion,
-      ml,
+    progressPollMs: 750,
+    externalCheck: (req) =>
+      safeExternalCheck(externalCheckDeps(), { ...req, consent: true }, (err) =>
+        logger.warn({ err }, 'external check failed'),
+      ),
+    explain: (input, extras) =>
+      explainResult(explainer, input, extras, (err) =>
+        logger.warn({ err }, 'explanation failed; template used'),
+      ),
+    enqueueExplain: async (analysisId) => {
+      await getExplainQueue().add(
+        'explain',
+        { analysisId },
+        { jobId: `explain-${analysisId}-${Date.now()}`, attempts: config.JOB_ATTEMPTS },
+      );
     },
-  );
-  await setStage(analysisId, 'explaining');
-  await getExplainQueue().add('explain', { analysisId }, { jobId: `explain-${analysisId}` });
-}
-
-async function runExplain(job: Job<AnalysisJob>): Promise<void> {
-  const { analysisId } = job.data;
-  const analysis = await Analysis.findById(analysisId).lean();
-  if (!analysis?.final || !analysis.ours) return;
-  const external = analysis.externalCheckId
-    ? await ExternalCheck.findById(analysis.externalCheckId).lean()
-    : null;
-
-  const ml = analysis.ml as {
-    mock?: boolean;
-    faces?: Array<{ scores?: { gendHead?: number; sbi?: number } }>;
-  } | null;
-  const input = {
-    final: analysis.final as never,
-    ours: {
-      verdict: analysis.ours.verdict as never,
-      probability: analysis.ours.probability ?? null,
-      threshold: analysis.ours.threshold ?? 0.5,
-      confident: analysis.ours.confident ?? false,
-      uncertainReason: analysis.ours.uncertainReason ?? null,
-      spread: analysis.ours.spread ?? null,
-    },
-    external: external
-      ? {
-          status: external.status,
-          deepfakeScore: external.deepfakeScore ?? null,
-          threshold: config.HIVE_THRESHOLD,
-          verdict:
-            external.status === 'ok' && typeof external.deepfakeScore === 'number'
-              ? external.deepfakeScore >= config.HIVE_THRESHOLD
-                ? ('FAKE' as const)
-                : ('REAL' as const)
-              : null,
-        }
-      : null,
-    mock: Boolean(ml?.mock),
   };
-  // Groq sees only the whitelisted result JSON built from these values (explain/prompt.ts).
-  const explanation = await explainResult(
-    explanationDeps(),
-    input,
-    {
-      ruleApplied: analysis.final.ruleApplied ?? null,
-      detectorScores: ml?.faces?.[0]?.scores ?? null,
-      aiGeneratedScore: external?.aiGeneratedScore ?? null,
-      provider: external?.provider ?? null,
-      modelCardVersion: analysis.modelCardVersion ?? null,
-    },
-    (err) => logger.warn({ err, analysisId }, 'explanation failed; template used'),
-  );
-  await Explanation.findOneAndUpdate({ analysisId }, explanation, { upsert: true });
-  await setStage(analysisId, 'done');
 }
 
-async function markFailed(job: Job<AnalysisJob> | undefined, err: Error): Promise<void> {
+/** Run a step; permanent errors skip BullMQ's retries. */
+const step =
+  (d: ProcessDeps, fn: (d: ProcessDeps, id: string) => Promise<void>) =>
+  async (job: Job<AnalysisJob>): Promise<void> => {
+    try {
+      await fn(d, job.data.analysisId);
+    } catch (err) {
+      if (err instanceof PermanentJobError) throw new UnrecoverableError(err.message);
+      if (err instanceof TransientJobError) throw err;
+      // Anything else is internal (database, Redis, a bug): log it in full, but never show its
+      // message to the user, who gets a generic one.
+      logger.error({ err, analysisId: job.data.analysisId }, 'unexpected job error');
+      throw new Error('Processing failed because of an internal error.');
+    }
+  };
+
+/** Called for every failed attempt: record a failure only when no retry is left. */
+async function onFailed(
+  d: ProcessDeps,
+  job: Job<AnalysisJob> | undefined,
+  err: Error,
+): Promise<void> {
   if (!job) return;
   const { analysisId } = job.data;
-  logger.error({ err, analysisId, queue: job.queueName }, 'job failed');
-  await Analysis.updateOne(
-    { _id: analysisId },
-    { status: 'failed', stage: 'failed', error: err.message },
+  const attempts = job.opts.attempts ?? 1;
+  const final = err.name === 'UnrecoverableError' || job.attemptsMade >= attempts;
+  logger.warn(
+    { analysisId, queue: job.queueName, attempt: job.attemptsMade, final, reason: err.message },
+    final ? 'job failed' : 'job attempt failed; retrying',
   );
-  emitProgress({ analysisId, stage: 'failed', detail: err.message });
+  if (final) {
+    await failAnalysis(d, analysisId, err.message).catch((e: unknown) =>
+      logger.error({ err: e, analysisId }, 'could not record the failure'),
+    );
+  } else {
+    await setStage(d, analysisId, 'queued').catch(() => undefined);
+  }
 }
 
-export function startWorkers(): { close: () => Promise<void> } {
+export function startWorkers(d: ProcessDeps): { close: () => Promise<void> } {
   const opts = { concurrency: config.WORKER_CONCURRENCY };
   const workers = [
-    new Worker<AnalysisJob>(ANALYSIS_QUEUE, runAnalysis, { ...opts, connection: newRedis() }),
-    new Worker<AnalysisJob>(EXPLAIN_QUEUE, runExplain, { ...opts, connection: newRedis() }),
+    new Worker<AnalysisJob>(ANALYSIS_QUEUE, step(d, processAnalysis), {
+      ...opts,
+      connection: newRedis(),
+    }),
+    new Worker<AnalysisJob>(EXPLAIN_QUEUE, step(d, processExplanation), {
+      ...opts,
+      connection: newRedis(),
+    }),
   ];
   for (const worker of workers) {
-    worker.on('failed', (job, err) => void markFailed(job, err));
+    worker.on('failed', (job, err) => void onFailed(d, job, err));
     worker.on('error', (err) => logger.error({ err }, 'worker error'));
   }
   return { close: async () => void (await Promise.all(workers.map((w) => w.close()))) };

@@ -1,83 +1,52 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
+import { Link } from 'react-router-dom';
 import { api } from '../api/client';
-import { watchAnalysis } from '../api/socket';
-import type { Analysis, Stage } from '../api/types';
 import ProgressSteps from '../components/ProgressSteps';
 import ResultView from '../components/ResultView';
+import { Disclaimer, ErrorState, PageHeader } from '../components/states';
 import UploadDropzone from '../components/UploadDropzone';
-
-const POLL_MS = 1500;
+import { CONNECTION_TEXT, useAnalysis } from '../hooks/useAnalysis';
 
 export default function Detect() {
   const [externalCheck, setExternalCheck] = useState(false);
   const [analysisId, setAnalysisId] = useState<string | null>(null);
-  const [stage, setStage] = useState<Stage | null>(null);
-  const [analysis, setAnalysis] = useState<Analysis | null>(null);
+  const [kind, setKind] = useState<'image' | 'video'>('image');
+  const [upload, setUpload] = useState<number | null>(null);
   const [preview, setPreview] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const watch = useAnalysis(analysisId);
 
-  const busy = stage !== null && stage !== 'done' && stage !== 'failed';
+  const uploading = upload !== null;
+  const busy =
+    uploading ||
+    (analysisId !== null && watch.stage !== 'done' && watch.stage !== 'failed' && !watch.error);
 
   async function start(file: File) {
-    setError(null);
-    setAnalysis(null);
-    setStage('queued');
+    setUploadError(null);
+    setAnalysisId(null);
+    setKind(file.type.startsWith('video/') ? 'video' : 'image');
     setPreview((old) => {
       if (old) URL.revokeObjectURL(old);
       return file.type.startsWith('image/') ? URL.createObjectURL(file) : null;
     });
+    setUpload(0);
     try {
-      const created = await api.createAnalysis(file, externalCheck);
+      const created = await api.createAnalysis(file, externalCheck, setUpload);
       setAnalysisId(created.analysisId);
     } catch (err) {
-      setStage(null);
-      setError(err instanceof Error ? err.message : 'Upload failed');
+      setUploadError(err instanceof Error ? err.message : 'Upload failed');
+    } finally {
+      setUpload(null);
     }
   }
 
-  // Follow the job: Socket.IO for live stages, polling as the fallback and for the result.
-  useEffect(() => {
-    if (!analysisId) return;
-    let stopped = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-
-    const load = async () => {
-      try {
-        const a = await api.getAnalysis(analysisId);
-        if (stopped) return;
-        setStage(a.stage);
-        if (a.status === 'done') return setAnalysis(a);
-        if (a.status === 'failed') return setError(a.error ?? 'The analysis failed');
-      } catch (err) {
-        if (!stopped) setError(err instanceof Error ? err.message : 'Could not load the result');
-        return;
-      }
-      timer = setTimeout(load, POLL_MS);
-    };
-
-    const stopWatching = watchAnalysis(analysisId, (e) => {
-      setStage(e.stage);
-      if (e.stage === 'done' || e.stage === 'failed') {
-        clearTimeout(timer);
-        void load();
-      }
-    });
-    void load();
-    return () => {
-      stopped = true;
-      clearTimeout(timer);
-      stopWatching();
-    };
-  }, [analysisId]);
+  const notice = analysisId && !watch.analysis ? CONNECTION_TEXT[watch.connection] : null;
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-semibold">Check a face for manipulation</h1>
-        <p className="mt-1 text-sm text-slate-600">
-          Upload a face image or a short video. The result is an automated check, not proof.
-        </p>
-      </div>
+      <PageHeader title="Check a face for manipulation">
+        Upload a face image or a short video. The result is an automated check, not proof.
+      </PageHeader>
 
       <UploadDropzone disabled={busy} onFile={start} />
 
@@ -98,16 +67,30 @@ export default function Detect() {
         </span>
       </label>
 
-      {stage && stage !== 'failed' && <ProgressSteps stage={stage} />}
-      {error && (
-        <p
-          role="alert"
-          className="rounded border border-rose-300 bg-rose-50 p-3 text-sm text-rose-800"
-        >
-          {error}
-        </p>
+      {(uploading ||
+        (analysisId && watch.stage && watch.stage !== 'failed' && !watch.analysis)) && (
+        <ProgressSteps
+          stage={watch.stage ?? 'queued'}
+          progress={watch.progress}
+          kind={kind}
+          upload={upload}
+        />
       )}
-      {analysis && <ResultView analysis={analysis} preview={preview} />}
+      {notice && <p className="text-sm text-amber-800">{notice}</p>}
+      {uploadError && <ErrorState message={uploadError} />}
+      {watch.error && <ErrorState message={watch.error} />}
+      {watch.analysis?.status === 'done' && (
+        <>
+          <p className="text-sm">
+            <Link className="underline" to={`/analyses/${watch.analysis.id}`}>
+              Permanent link to this result
+            </Link>{' '}
+            (also in your History).
+          </p>
+          <ResultView analysis={watch.analysis} preview={preview} />
+        </>
+      )}
+      {!analysisId && !uploading && <Disclaimer />}
     </div>
   );
 }

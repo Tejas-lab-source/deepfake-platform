@@ -35,6 +35,8 @@ const schema = z.object({
   MAX_VIDEO_MB: z.coerce.number().default(100),
   MEDIA_TTL_HOURS: z.coerce.number().default(24),
   K: z.coerce.number().int().min(0).default(4),
+  // Beautified copies per video frame (0 = clean frame only: K copies x 32 frames is slow on CPU).
+  VIDEO_K: z.coerce.number().int().min(0).max(8).default(0),
 
   // External second check (Hive v3). Mode defaults from MOCK_MODE: mock when true, real when
   // false. "off" disables it. A real call also needs the user's per-upload consent.
@@ -70,14 +72,32 @@ const schema = z.object({
   GROQ_TEMPERATURE: z.coerce.number().min(0).max(2).default(0.2),
 
   WORKER_CONCURRENCY: z.coerce.number().int().default(2),
+
+  // Phase 5/6: browser origins allowed by CORS, comma-separated. Empty = same origin only
+  // (the web container proxies /api and /socket.io, so the browser never needs CORS).
+  CORS_ORIGINS: z.string().default(''),
+  TRUST_PROXY: z.coerce.number().int().min(0).default(1),
+  RATE_LIMIT_AUTH_PER_15MIN: z.coerce.number().int().min(1).default(20),
+  RATE_LIMIT_UPLOADS_PER_HOUR: z.coerce.number().int().min(1).default(30),
+  RATE_LIMIT_ASK_PER_HOUR: z.coerce.number().int().min(1).default(60),
+  RATE_LIMIT_COMPARE_PER_HOUR: z.coerce.number().int().min(1).default(20),
+  ASK_MAX_QUESTION_CHARS: z.coerce.number().int().min(20).max(2000).default(500),
+  // Reliability: attempts per analysis job, and when an unfinished job counts as stuck.
+  JOB_ATTEMPTS: z.coerce.number().int().min(1).max(5).default(2),
+  STALE_JOB_MINUTES: z.coerce.number().int().min(5).default(30),
+  CLEANUP_INTERVAL_MINUTES: z.coerce.number().int().min(1).default(10),
 });
 
 type Parsed = z.infer<typeof schema>;
 
-export type Config = Omit<Parsed, 'HIVE_MODE' | 'GROQ_MODE' | 'GROQ_MODEL_FALLBACKS'> & {
+export type Config = Omit<
+  Parsed,
+  'HIVE_MODE' | 'GROQ_MODE' | 'GROQ_MODEL_FALLBACKS' | 'CORS_ORIGINS'
+> & {
   HIVE_MODE: ProviderMode;
   GROQ_MODE: ProviderMode;
   GROQ_MODEL_FALLBACKS: string[];
+  CORS_ORIGINS: string[];
 };
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -93,6 +113,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     GROQ_MODEL_FALLBACKS: parsed.GROQ_MODEL_FALLBACKS.split(',')
       .map((m) => m.trim())
       .filter((m) => m.length > 0),
+    CORS_ORIGINS: parsed.CORS_ORIGINS.split(',')
+      .map((o) => o.trim())
+      .filter((o) => o.length > 0),
   };
   if (cfg.HIVE_DEMO_RESERVE > cfg.HIVE_DAILY_LIMIT) {
     throw new Error('HIVE_DEMO_RESERVE cannot exceed HIVE_DAILY_LIMIT');
