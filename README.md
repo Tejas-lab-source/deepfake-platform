@@ -536,9 +536,11 @@ Static checks: `npm run typecheck`, `npm run lint`, Prettier (`server`, `web`), 
 requests: **server** (type-check, lint, format, all tests with Redis and MongoDB service
 containers, build), **web** (type-check, lint, format, tests, build), **ml** (ruff, black,
 mypy, pytest) and **compose-e2e** (`docker compose config`, `up --build --wait`, the mock smoke
-test). No job needs Hive or Groq credentials. The model weights are not in the repository, so
-the ML job reports the weight-dependent tests as skipped; they were run locally with the
-weights (192 passed).
+test). No job needs Hive or Groq credentials. Model weights are not in the repository: the
+ML job downloads the public ones (GenD, CLIP config, MediaPipe; cached between runs) and so
+runs the real-model tests too. The SBI checkpoint comes from Google Drive, which often refuses
+scripted downloads; then only the SBI-specific tests are skipped, each with its reason. With
+all weights present (locally), the ML suite runs 192 tests with none skipped.
 
 ## Known limitations
 

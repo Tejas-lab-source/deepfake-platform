@@ -94,9 +94,23 @@ jobs:
       - run: ruff check .
       - run: black --check .
       - run: mypy app offline
-      # Model weights are not in the repository (licences; the SBI checkpoint needs a manual
-      # download), so the tests that need them report "skipped: needs ... weights" here. They
-      # run wherever the weights are present (see README, "Testing").
+      # Public weights (GenD + CLIP config from Hugging Face, MediaPipe from Google), cached,
+      # so the real-model tests run here too. The SBI checkpoint is on Google Drive, which
+      # often refuses scripted downloads: the script then exits 2 (its documented "manual
+      # step" code) and only the SBI-specific tests are skipped, each with its reason. Any
+      # other failure fails the job.
+      - uses: actions/cache@v4
+        with:
+          path: ml-service/weights
+          key: ml-weights-${{ hashFiles('scripts/download_weights.sh') }}
+      - name: Download public model weights
+        working-directory: .
+        run: |
+          set +e
+          PYTHON=python bash scripts/download_weights.sh
+          code=$?
+          if [ "$code" -ne 0 ] && [ "$code" -ne 2 ]; then exit "$code"; fi
+          ls -la ml-service/weights/*/
       - run: pytest -q -rs
 
   compose-e2e:
