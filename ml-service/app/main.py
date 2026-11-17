@@ -20,6 +20,7 @@ from app.config import Settings, get_settings
 from app.head import Calibration, load_calibration
 from app.media import MediaError, resolve_upload, validate
 from app.pipeline import PipelineError, RealPipeline
+from app.progress import PROGRESS_ID, ProgressStore
 
 
 class JsonFormatter(logging.Formatter):
@@ -53,6 +54,8 @@ log = logging.getLogger("ml-service")
 calibration: Calibration = load_calibration(settings.model_card_path)
 # Inference runs one request at a time.
 inference_lock = threading.Lock()
+# Measured progress of running requests, polled by the server (GET /progress/{id}).
+progress_store = ProgressStore()
 
 
 class ModelState:
@@ -104,16 +107,22 @@ Secured = Depends(require_secret)
 Family = Literal["F1", "F2", "F3", "F4"]
 
 
+ProgressId = Annotated[str, Field(pattern=PROGRESS_ID.pattern)]
+
+
 class AnalyzeImageRequest(BaseModel):
     path: str
     k: int | None = Field(default=None, ge=0, le=16)
     explain: bool = True
+    progressId: ProgressId | None = None  # noqa: N815
 
 
 class AnalyzeVideoRequest(BaseModel):
     path: str
     maxFrames: int | None = Field(default=None, ge=1, le=256)  # noqa: N815
     k: int | None = Field(default=None, ge=0, le=16)
+    explain: bool = True
+    progressId: ProgressId | None = None  # noqa: N815
 
 
 class FilterRequest(BaseModel):
@@ -177,6 +186,8 @@ def analyze_image(req: AnalyzeImageRequest) -> dict[str, Any]:
     pipeline = None if settings.mock_mode else _real()
     file = _file(req.path, "image")
     k = settings.k if req.k is None else req.k
+    report = progress_store.reporter(req.progressId)
+    report("queued", 0, 1, "images")
     with inference_lock:
         start = time.perf_counter()
         if pipeline is None:
@@ -185,7 +196,7 @@ def analyze_image(req: AnalyzeImageRequest) -> dict[str, Any]:
             score_ms = round((time.perf_counter() - start) * 1000)
             result["timingsMs"] = {"detect": 0, "beautify": 0, "score": score_ms, "explain": 0}
         else:
-            result = pipeline.analyze_image(file, k, req.explain)
+            result = pipeline.analyze_image(file, k, req.explain, report)
         total_ms = round((time.perf_counter() - start) * 1000)
     log.info("analyze_image", extra={"data": {"verdict": result["verdict"], "ms": total_ms}})
     return result
@@ -193,19 +204,63 @@ def analyze_image(req: AnalyzeImageRequest) -> dict[str, Any]:
 
 @app.post("/analyze/video", dependencies=[Secured])
 def analyze_video(req: AnalyzeVideoRequest) -> dict[str, Any]:
-    if not settings.mock_mode:
-        raise HTTPException(
-            status_code=501, detail="Real video analysis is not implemented yet (Phase 5)."
-        )
+    pipeline = None if settings.mock_mode else _real()
     file = _file(req.path, "video")
-    max_frames = settings.max_frames if req.maxFrames is None else req.maxFrames
+    max_frames = min(settings.max_frames, req.maxFrames or settings.max_frames)
+    k = 0 if req.k is None else req.k
+    report = progress_store.reporter(req.progressId)
+    report("queued", 0, 1, "videos")
     with inference_lock:
         start = time.perf_counter()
-        result = mock.analyze_video(file, calibration, max_frames, settings.video_top_k)
-        score_ms = round((time.perf_counter() - start) * 1000)
-    result["timingsMs"] = {"detect": 0, "beautify": 0, "score": score_ms, "explain": 0}
-    log.info("analyze_video", extra={"data": {"verdict": result["verdict"], "ms": score_ms}})
+        try:
+            if pipeline is None:
+                result = mock.analyze_video(
+                    file,
+                    calibration,
+                    max_frames,
+                    settings.video_top_k,
+                    settings.max_video_decode_frames,
+                    report,
+                )
+                ms = round((time.perf_counter() - start) * 1000)
+                result["timingsMs"] = {
+                    "decode": ms,
+                    "detect": 0,
+                    "beautify": 0,
+                    "score": 0,
+                    "explain": 0,
+                }
+            else:
+                result = pipeline.analyze_video(
+                    file, k, max_frames, settings.video_top_k, req.explain, report
+                )
+        except MediaError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except PipelineError as exc:
+            raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
+        total_ms = round((time.perf_counter() - start) * 1000)
+    log.info(
+        "analyze_video",
+        extra={
+            "data": {
+                "verdict": result["verdict"],
+                "frames": result.get("framesSampled"),
+                "scored": result.get("framesScored"),
+                "ms": total_ms,
+            }
+        },
+    )
     return result
+
+
+@app.get("/progress/{progress_id}", dependencies=[Secured])
+def get_progress(progress_id: str) -> dict[str, Any]:
+    if not PROGRESS_ID.fullmatch(progress_id):
+        raise HTTPException(status_code=422, detail="invalid progress id")
+    item = progress_store.get(progress_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="no progress for this id")
+    return item
 
 
 def _require_real_for_filters() -> RealPipeline:

@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     max_frames: int = 32
     # Video verdict = mean of the top-k frame logits.
     video_top_k: int = 5
+    # Videos with more decodable frames than this are refused (about 10 min at 30 fps).
+    max_video_decode_frames: int = 18000
 
     # Real-mode pipeline settings.
     device: str = "auto"  # auto, cpu or cuda

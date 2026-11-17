@@ -8,13 +8,16 @@ run without weights, a GPU or API keys. Verdicts still go through the real decis
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 from pathlib import Path
 from typing import Any
 
 from PIL import Image
 
 from app.head import Calibration
-from app.pipeline import aggregate, decide, top_k_mean
+from app.pipeline import aggregate, decide
+from app.progress import ProgressFn, no_progress
+from app.video import VideoInfo, aggregate_frames, probe, sample_indices, timestamp
 
 VARIANT_NAMES = ("F1", "F2", "F3", "mix")
 
@@ -80,42 +83,52 @@ def analyze_image(path: Path, cal: Calibration, k: int) -> dict[str, Any]:
     }
 
 
-def analyze_video(path: Path, cal: Calibration, max_frames: int, top_k: int) -> dict[str, Any]:
-    """Mock video result. The file is not decoded, so frames are synthetic."""
-    n = max(1, min(max_frames, 16))
+def analyze_video(
+    path: Path,
+    cal: Calibration,
+    max_frames: int,
+    top_k: int,
+    max_decode_frames: int = 18000,
+    progress: ProgressFn | None = None,
+) -> dict[str, Any]:
+    """Mock video result: real frame sampling and timestamps when OpenCV is installed,
+    placeholder scores derived from the file hash for every sampled frame."""
+    report = progress or no_progress
+    base_logit = 3.0 * _signed(file_digest(path), 0)
+    info: VideoInfo | None = None
+    if importlib.util.find_spec("cv2") is not None:
+        report("detecting_faces", 0, 1, "videos")
+        info = probe(path, max_decode_frames)
+        indices = sample_indices(info.frame_count, max_frames)
+    else:
+        # Without OpenCV the file is not decoded: synthetic frames without timestamps.
+        indices = list(range(max(1, min(max_frames, 16))))
+    report("extracting_frames", 0, len(indices), "frames")
     frames: list[dict[str, Any]] = []
-    logits: list[float] = []
-    base = 3.0 * _signed(file_digest(path), 0)
-    for i in range(n):
-        d = file_digest(path, salt=f"frame-{i}".encode())
+    for n, index in enumerate(indices):
+        report("scoring", n, len(indices), "frames")
+        d = file_digest(path, salt=f"frame-{index}".encode())
         has_face = _unit(d, 0) > 0.15
-        logit = round(base + 0.8 * _signed(d, 1), 4) if has_face else None
-        if logit is not None:
-            logits.append(logit)
-        frames.append({"index": i, "hasFace": has_face, "logit": logit})
-    if not logits:
-        return {
-            "verdict": "UNCERTAIN",
-            "probability": None,
-            "threshold": cal.threshold,
-            "confident": False,
-            "uncertainReason": "no_face_detected",
-            "frames": frames,
-            "framesScored": 0,
-            "modelCardVersion": cal.version,
-            "mock": True,
-        }
-    agg = top_k_mean(logits, top_k)
-    decision = decide(cal, {"clean": agg}, None, 0.0)
+        frames.append(
+            {
+                "index": index,
+                "timestamp": None if info is None else timestamp(index, info.fps),
+                "decoded": info is not None,
+                "hasFace": has_face,
+                "faceCount": 1 if has_face else 0,
+                "logit": round(base_logit + 0.8 * _signed(d, 1), 4) if has_face else None,
+                "sbi": None,
+                "explained": False,
+            }
+        )
+    report("aggregating", 0, 1, "frames")
+    result = aggregate_frames(frames, cal, top_k)
     return {
-        "verdict": decision.verdict,
-        "probability": round(decision.probability, 4),
-        "threshold": cal.threshold,
-        "confident": decision.confident,
-        "uncertainReason": decision.uncertain_reason,
+        **result,
+        "kind": "video",
+        "video": None if info is None else {**info.to_dict(), "sampledFrames": len(indices)},
         "frames": frames,
-        "framesScored": len(logits),
-        "aggregate": {"method": "top_k_mean", "k": top_k, "logit": round(agg, 4)},
+        "faces": [],
         "modelCardVersion": cal.version,
         "mock": True,
     }

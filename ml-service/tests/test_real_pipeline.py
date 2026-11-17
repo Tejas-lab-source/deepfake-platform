@@ -177,5 +177,82 @@ def test_filter_errors(client):
         ).status_code
         == 501
     )
-    assert _post(client, "/analyze/video", {"path": "face.png"}).status_code == 501
+    # Real video analysis exists since Phase 5; an image sent as a video is refused clearly.
+    not_video = _post(client, "/analyze/video", {"path": "face.png"})
+    assert not_video.status_code == 422 and "not a supported video" in not_video.json()["detail"]
     assert Path(client[1] / "derived").is_dir()
+
+
+# ---- /analyze/video with the real models -------------------------------------------------
+
+
+def _face_video(uploads: Path, photo, pattern: str, name: str, fps: float = 4.0) -> str:
+    """A video whose frames follow `pattern`: "F" = the portrait, "." = a blank grey frame."""
+    import cv2
+
+    blank = np.full_like(photo, 128)
+    path = uploads / name
+    h, w = photo.shape[:2]
+    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
+    assert writer.isOpened()
+    for c in pattern:
+        writer.write(cv2.cvtColor(photo if c == "F" else blank, cv2.COLOR_RGB2BGR))
+    writer.release()
+    return name
+
+
+def test_analyze_video_real_models(client, photo):
+    from app import main
+
+    pattern = "FF.F.FF."
+    name = _face_video(client[1], photo, pattern, "clip.mp4")
+    body = {"path": name, "k": 0, "maxFrames": 8, "progressId": "real-video"}
+    r = _post(client, "/analyze/video", body)
+    assert r.status_code == 200, r.text
+    out = r.json()
+    assert "mock" not in out and out["kind"] == "video"
+    assert out["video"]["frameCount"] == len(pattern) and out["framesSampled"] == len(pattern)
+
+    frames = out["frames"]
+    assert [f["index"] for f in frames] == list(range(len(pattern)))
+    assert [f["timestamp"] for f in frames] == [i / 4.0 for i in range(len(pattern))]
+    for f, c in zip(frames, pattern, strict=True):
+        # Blank frames have no face: excluded, never scored as real.
+        assert f["hasFace"] is (c == "F"), f
+        assert (f["logit"] is None) is (c != "F")
+    assert out["framesScored"] == pattern.count("F")
+
+    # The verdict is the top-k mean of the face frames' logits, through the decision rules.
+    logits = [f["logit"] for f in frames if f["logit"] is not None]
+    k = min(main.settings.video_top_k, len(logits))
+    assert out["aggregate"]["k"] == k
+    assert out["aggregate"]["logit"] == pytest.approx(
+        sum(sorted(logits, reverse=True)[:k]) / k, abs=1e-3
+    )
+    assert out["verdict"] in {"FAKE", "REAL", "UNCERTAIN"}
+    most, least = out["mostSuspicious"], out["leastSuspicious"]
+    assert most["logit"] == max(logits) and least["logit"] == min(logits)
+    assert pattern[most["index"]] == "F" and pattern[least["index"]] == "F"
+
+    # Only the most and least suspicious frames are explained, with heatmaps on disk.
+    explained = [f for f in frames if f["explained"]]
+    assert {f["index"] for f in explained} == {most["index"], least["index"]}
+    for f in explained:
+        maps = f["faces"][0]["heatmaps"]
+        assert (client[1] / maps["gend"]).is_file()
+        if SBI.is_file():
+            assert (client[1] / maps["sbi"]).is_file()
+    assert out["faces"] and out["faces"][0]["scores"]["gendHead"] == pytest.approx(
+        most["logit"], abs=1e-3
+    )
+    assert set(out["timingsMs"]) == {"decode", "detect", "beautify", "score", "explain"}
+    progress = client[0].get("/progress/real-video", headers=HEADERS).json()
+    assert progress["stage"] == "aggregating" and progress["done"] == progress["total"]
+
+
+def test_video_without_faces_is_uncertain_not_real(client, photo):
+    name = _face_video(client[1], photo, "....", "blank.mp4")
+    out = _post(client, "/analyze/video", {"path": name, "k": 0}).json()
+    assert out["verdict"] == "UNCERTAIN" and out["uncertainReason"] == "no_face_detected"
+    assert out["probability"] is None and out["framesScored"] == 0
+    assert out["faces"] == [] and all(not f["hasFace"] for f in out["frames"])
