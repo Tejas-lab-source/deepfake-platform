@@ -14,7 +14,13 @@ export function newRedis(): Redis {
   return new Redis(config.REDIS_URL, { maxRetriesPerRequest: null });
 }
 
-const jobDefaults = { removeOnComplete: 1000, removeOnFail: 1000 };
+// Bounded retries with backoff for transient failures (ML service restarting, Redis blips).
+const jobDefaults = {
+  removeOnComplete: 1000,
+  removeOnFail: 1000,
+  attempts: config.JOB_ATTEMPTS,
+  backoff: { type: 'exponential' as const, delay: 15_000 },
+};
 
 let analysisQueue: Queue<AnalysisJob> | null = null;
 let explainQueue: Queue<AnalysisJob> | null = null;

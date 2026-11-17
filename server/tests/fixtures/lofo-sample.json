@@ -1,0 +1,56 @@
+{
+  "schema": 1,
+  "protocol": { "note": "TEST FIXTURE: shape of offline/eval_lofo.py output; numbers are made up" },
+  "fixture": true,
+  "notice": "PLUMBING FIXTURE: not an accuracy result",
+  "created": "2026-11-17T00:00:00+00:00",
+  "inputs": { "test_faces": 8, "test_videos": 2 },
+  "runs": [
+    {
+      "scheme": "H-a",
+      "fold": "F1",
+      "seed": 0,
+      "held_out": true,
+      "calibration": { "threshold": 0.5 },
+      "metrics": { "clean_auc": 0.81, "flip_rate": 0.2 }
+    },
+    {
+      "scheme": "H-f",
+      "fold": "F1",
+      "seed": 0,
+      "held_out": true,
+      "calibration": { "threshold": 0.5 },
+      "metrics": { "clean_auc": 0.8, "flip_rate": 0.1 }
+    }
+  ],
+  "per_fold": {
+    "H-a__F1": {
+      "held_out": true,
+      "clean_auc": { "mean": 0.81, "std_over_seeds": 0, "ci95": [0.7, 0.9] },
+      "flip_rate": { "mean": 0.2, "std_over_seeds": 0, "ci95": null }
+    },
+    "H-f__F1": {
+      "held_out": true,
+      "clean_auc": { "mean": 0.8, "std_over_seeds": 0, "ci95": [0.69, 0.88] },
+      "flip_rate": { "mean": 0.1, "std_over_seeds": 0, "ci95": [0.05, 0.15] }
+    }
+  },
+  "aggregate_over_held_out_folds": {
+    "H-a": {
+      "folds_included": ["F1"],
+      "clean_auc": { "mean": 0.81 },
+      "flip_rate": { "mean": 0.2 }
+    },
+    "H-f": { "folds_included": ["F1"], "clean_auc": { "mean": 0.8 }, "flip_rate": { "mean": 0.1 } }
+  },
+  "heatmap_iou_seed0": {},
+  "ablation_shipped_head_clean_test_inputs": { "rows": [] },
+  "success_criteria": [
+    {
+      "name": "flip_rate_reduction",
+      "met": true,
+      "fixture_only": "plumbing fixture: not an accuracy result"
+    }
+  ],
+  "code_commit": "0000000"
+}

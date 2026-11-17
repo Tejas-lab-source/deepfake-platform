@@ -4,11 +4,24 @@ export type MediaKind = 'image' | 'video';
 export type Badge =
   'verified_by_2' | 'second_check_disagrees' | 'checks_disagree' | 'hive_hint' | 'single_check';
 
-/** Progress stages, in order. `failed` can replace any stage after `queued`. */
+/**
+ * Progress stages, in order. `failed` can replace any stage after `queued`.
+ * Phase 5 added `extracting_frames` (videos only) and `aggregating`; the earlier stage names
+ * are unchanged, so existing clients still understand every event they knew before.
+ *   queued            waiting for a worker
+ *   detecting_faces   preprocessing: decoding the upload, finding faces
+ *   extracting_frames video only: sampling frames
+ *   scoring           running the detectors (per face, or per sampled frame)
+ *   aggregating       combining copies/frames into one verdict, heatmaps
+ *   verifying         the optional second check, then the reconciler
+ *   explaining        writing the explanation (the report text)
+ */
 export const STAGES = [
   'queued',
   'detecting_faces',
+  'extracting_frames',
   'scoring',
+  'aggregating',
   'verifying',
   'explaining',
   'done',
