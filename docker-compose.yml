@@ -36,6 +36,10 @@ services:
       UPLOAD_DIR: /data/uploads
       WEIGHTS_DIR: /app/weights
       K: ${K:-4}
+      MAX_FRAMES: ${MAX_FRAMES:-32}
+      VIDEO_TOP_K: ${VIDEO_TOP_K:-5}
+      MAX_VIDEO_MB: ${MAX_VIDEO_MB:-100}
+      MAX_IMAGE_MB: ${MAX_IMAGE_MB:-10}
     volumes:
       - uploads:/data/uploads
       - ./ml-service/weights:/app/weights
@@ -66,9 +70,21 @@ services:
       JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:-dev-refresh-secret-change-me}
       UPLOAD_DIR: /data/uploads
       MEDIA_TTL_HOURS: ${MEDIA_TTL_HOURS:-24}
+      MAX_IMAGE_MB: ${MAX_IMAGE_MB:-10}
+      MAX_VIDEO_MB: ${MAX_VIDEO_MB:-100}
       K: ${K:-4}
-      # Second check (Hive v3). Empty mode = follow MOCK_MODE (mock or real); "off" disables.
-      HIVE_MODE: ${HIVE_MODE:-}
+      VIDEO_K: ${VIDEO_K:-0}
+      # Same origin by default (nginx proxies /api and /socket.io); comma-separated origins.
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
+      RATE_LIMIT_AUTH_PER_15MIN: ${RATE_LIMIT_AUTH_PER_15MIN:-20}
+      RATE_LIMIT_UPLOADS_PER_HOUR: ${RATE_LIMIT_UPLOADS_PER_HOUR:-30}
+      RATE_LIMIT_ASK_PER_HOUR: ${RATE_LIMIT_ASK_PER_HOUR:-60}
+      RATE_LIMIT_COMPARE_PER_HOUR: ${RATE_LIMIT_COMPARE_PER_HOUR:-20}
+      JOB_ATTEMPTS: ${JOB_ATTEMPTS:-2}
+      STALE_JOB_MINUTES: ${STALE_JOB_MINUTES:-30}
+      # Second check (Hive v3): mock by default, so turning MOCK_MODE off for the real models
+      # never starts paid calls by itself. Set HIVE_MODE=real (and a key) to opt in.
+      HIVE_MODE: ${HIVE_MODE:-mock}
       HIVE_API_KEY: ${HIVE_API_KEY:-}
       HIVE_API_URL: ${HIVE_API_URL:-}
       HIVE_THRESHOLD: ${HIVE_THRESHOLD:-0.9}
@@ -77,8 +93,8 @@ services:
       HIVE_DEMO_RESERVE: ${HIVE_DEMO_RESERVE:-20}
       HIVE_USER_DAILY_LIMIT: ${HIVE_USER_DAILY_LIMIT:-10}
       HIVE_RETRIES: ${HIVE_RETRIES:-0}
-      # Explanations (Groq). Empty mode = follow MOCK_MODE; mock and off use the template.
-      GROQ_MODE: ${GROQ_MODE:-}
+      # Explanations and Ask (Groq): off by default; the template is used. GROQ_MODE=real opts in.
+      GROQ_MODE: ${GROQ_MODE:-off}
       GROQ_API_KEY: ${GROQ_API_KEY:-}
       GROQ_BASE_URL: ${GROQ_BASE_URL:-}
       GROQ_MODEL_EXPLAIN: ${GROQ_MODEL_EXPLAIN:-openai/gpt-oss-120b}
