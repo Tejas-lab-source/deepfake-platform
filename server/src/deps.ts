@@ -3,10 +3,12 @@
  * without MongoDB, Redis or the ML service. Production wiring lives in productionDeps().
  */
 import type { Redis } from 'ioredis';
+import type { AskDeps } from './ask/answer.js';
 import { config } from './config.js';
 import { mongoRepos } from './data/mongo.js';
 import type { Repos } from './data/types.js';
 import { configLimits, type UploadLimits } from './middleware/upload.js';
+import { GroqClient } from './providers/groq.js';
 import { configuredMlClient, type MlApi } from './providers/mlClient.js';
 import { getAnalysisQueue } from './queue/queues.js';
 import { redisRateLimiter, type RateLimiter } from './rateLimit.js';
@@ -38,6 +40,29 @@ export interface AppDeps {
   /** Allowed browser origins for CORS; empty means same-origin only. */
   corsOrigins: string[];
   mockMode: boolean;
+  /** Hive's FAKE threshold, for the facts shown to Ask and the report. */
+  hiveThreshold: number;
+  /** Ask answers: the template, or Groq only when GROQ_MODE=real (off by default). */
+  ask: AskDeps;
+  maxQuestionChars: number;
+}
+
+/** Groq for /ask only when explicitly enabled; otherwise template answers. */
+export function productionAskDeps(): AskDeps {
+  if (config.GROQ_MODE !== 'real') return { mode: config.GROQ_MODE, groq: null };
+  return {
+    mode: 'real',
+    groq: new GroqClient({
+      apiKey: config.GROQ_API_KEY,
+      baseUrl: config.GROQ_BASE_URL,
+      models: [config.GROQ_MODEL_CHAT],
+      timeoutMs: config.GROQ_TIMEOUT_MS,
+      retries: 0,
+      maxCompletionTokens: 512,
+      reasoningEffort: config.GROQ_REASONING_EFFORT,
+      temperature: config.GROQ_TEMPERATURE,
+    }),
+  };
 }
 
 export function productionRateLimiters(redis: Redis): RateLimiters {
@@ -65,5 +90,8 @@ export function productionDeps(redis: Redis): AppDeps {
     rateLimiters: productionRateLimiters(redis),
     corsOrigins: config.CORS_ORIGINS,
     mockMode: config.MOCK_MODE,
+    hiveThreshold: config.HIVE_THRESHOLD,
+    ask: productionAskDeps(),
+    maxQuestionChars: config.ASK_MAX_QUESTION_CHARS,
   };
 }

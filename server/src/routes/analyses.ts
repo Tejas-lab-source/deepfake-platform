@@ -1,13 +1,17 @@
 import { Router, type Request } from 'express';
 import { z } from 'zod';
 import { config } from '../config.js';
-import type { AnalysisRecord } from '../data/types.js';
+import { answerQuestion } from '../ask/answer.js';
+import { buildAskFacts } from '../ask/facts.js';
+import type { AnalysisRecord, ComparisonRecord } from '../data/types.js';
 import type { AppDeps } from '../deps.js';
 import { logger } from '../logger.js';
 import { requireAuth } from '../middleware/auth.js';
 import { HttpProblem } from '../middleware/problem.js';
 import { createUpload, inspectUpload } from '../middleware/upload.js';
+import { MlServiceError, type FilterFamily } from '../providers/mlClient.js';
 import { rateLimit } from '../rateLimit.js';
+import { buildReportData, renderReportPdf } from '../report/pdf.js';
 import { collectDerivedKeys, DERIVED_NAME } from '../storage.js';
 import { presentAnalysis, presentListItem } from './present.js';
 
@@ -129,6 +133,114 @@ export function analysesRouter(deps: AppDeps): Router {
       .send(file.bytes);
   });
 
+  /** Results exist only once an analysis is done (its explanation is part of the result). */
+  async function finished(req: Request): Promise<AnalysisRecord> {
+    const a = await owned(req);
+    if (a.status !== 'done' || !a.final || !a.ours) {
+      throw new HttpProblem(409, 'Analysis not finished', 'Try again once the analysis is done.');
+    }
+    return a;
+  }
+
+  router.post(
+    '/:id/ask',
+    rateLimit(deps.rateLimiters.ask, (req) => req.user!.id),
+    async (req, res) => {
+      const { question } = z
+        .object({ question: z.string().trim().min(3).max(deps.maxQuestionChars) })
+        .parse(req.body);
+      const a = await finished(req);
+      const external = a.externalCheckId
+        ? await repos.externalChecks.findById(a.externalCheckId)
+        : null;
+      const facts = buildAskFacts(a, external, deps.hiveThreshold);
+      if (!facts) throw new HttpProblem(409, 'Analysis not finished');
+      const r = await answerQuestion(deps.ask, question, facts);
+      res.json({
+        answer: r.answer,
+        source: r.source,
+        intent: r.intent,
+        fallbackReason: r.fallbackReason,
+      });
+    },
+  );
+
+  router.get('/:id/report.pdf', async (req, res) => {
+    const a = await finished(req);
+    const [external, explanation] = await Promise.all([
+      a.externalCheckId ? repos.externalChecks.findById(a.externalCheckId) : null,
+      repos.explanations.findByAnalysis(a.id),
+    ]);
+    const pdf = await renderReportPdf(buildReportData(a, external, explanation));
+    res
+      .status(200)
+      .set({
+        'Content-Type': 'application/pdf',
+        'Content-Disposition': `attachment; filename="analysis-${a.id}.pdf"`,
+        'Content-Length': String(pdf.length),
+      })
+      .send(pdf);
+  });
+
+  router.get('/:id/comparisons', async (req, res) => {
+    const a = await owned(req);
+    const items = await repos.comparisons.listByAnalysis(a.id);
+    res.json({ items: items.map(presentComparison) });
+  });
+
+  /** Filter Lab: the same face before and after one beauty filter (real pipeline only). */
+  router.post(
+    '/:id/compare',
+    rateLimit(deps.rateLimiters.compare, (req) => req.user!.id),
+    async (req, res) => {
+      const { family, strength } = z
+        .object({
+          family: z.enum(['F1', 'F2', 'F3', 'F4']),
+          strength: z.number().min(0).max(1),
+        })
+        .parse(req.body);
+      const a = await finished(req);
+      if (a.kind !== 'image') {
+        throw new HttpProblem(422, 'Images only', 'The Filter Lab compares one image at a time.');
+      }
+      const media = await repos.media.findById(a.mediaId);
+      if (!media || !files.uploadPath(media.storageKey)) {
+        throw new HttpProblem(410, 'Upload expired', 'The original file is no longer stored.');
+      }
+      let result: Record<string, unknown>;
+      try {
+        result = await deps.ml.compare(media.storageKey, family as FilterFamily, strength);
+      } catch (err) {
+        if (err instanceof MlServiceError) {
+          const detail = err.message.replace(/^ML service \d+: /, '');
+          if (err.status === 501) {
+            throw new HttpProblem(501, 'Not available', detail);
+          }
+          if (err.status === 422) throw new HttpProblem(422, 'Cannot compare', detail);
+          throw new HttpProblem(503, 'ML service unavailable', 'Try again in a moment.');
+        }
+        throw err;
+      }
+      const clean = (result.clean ?? {}) as Record<string, unknown>;
+      const filtered = (result.filtered ?? {}) as Record<string, unknown>;
+      const saved = await repos.comparisons.create({
+        analysisId: a.id,
+        ownerId: a.ownerId,
+        family,
+        strength,
+        threshold: typeof result.threshold === 'number' ? result.threshold : null,
+        clean,
+        filtered,
+        flipped: clean.verdict !== filtered.verdict,
+        heatmapIoU: typeof result.heatmapIoU === 'number' ? result.heatmapIoU : null,
+        heatmapKeys: collectDerivedKeys(result),
+        modelCardVersion:
+          typeof result.modelCardVersion === 'string' ? result.modelCardVersion : null,
+      });
+      res.status(201).json(presentComparison(saved));
+    },
+  );
+
   router.delete('/:id', async (req, res) => {
     const a = await owned(req);
     await deleteAnalysis(deps, a);
@@ -136,6 +248,31 @@ export function analysesRouter(deps: AppDeps): Router {
   });
 
   return router;
+}
+
+function presentComparison(c: ComparisonRecord) {
+  const side = (v: Record<string, unknown>) => ({
+    verdict: v.verdict ?? null,
+    probability: v.probability ?? null,
+    confident: v.confident ?? null,
+    uncertainReason: v.uncertainReason ?? null,
+    scores: v.scores ?? null,
+    beautifiedLikelihood: v.beautifiedLikelihood ?? null,
+    image: v.image ?? null,
+    heatmap: v.heatmap ?? null,
+  });
+  return {
+    id: c.id,
+    family: c.family,
+    strength: c.strength,
+    threshold: c.threshold,
+    clean: side(c.clean),
+    filtered: side(c.filtered),
+    flipped: c.flipped,
+    heatmapIoU: c.heatmapIoU,
+    modelCardVersion: c.modelCardVersion,
+    createdAt: c.createdAt,
+  };
 }
 
 /** Remove an analysis and everything it produced: upload, derived images, results. */

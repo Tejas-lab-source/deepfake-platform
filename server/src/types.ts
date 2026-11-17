@@ -40,7 +40,14 @@ export interface MlResult {
     spread?: number;
     [key: string]: unknown;
   }>;
-  frames?: Array<{ index: number; hasFace: boolean; logit: number | null }>;
+  /** Video: one entry per sampled frame (Phase 5 adds timestamp, decoded, probability...). */
+  frames?: Array<{
+    index: number;
+    hasFace: boolean;
+    logit: number | null;
+    timestamp?: number | null;
+    [key: string]: unknown;
+  }>;
   modelCardVersion: string;
   mock?: boolean;
   [key: string]: unknown;

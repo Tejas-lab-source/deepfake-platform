@@ -11,6 +11,7 @@
  * Re-running a job is safe: a finished analysis is left alone, and a saved result is never
  * recomputed just to write its explanation.
  */
+import { explanationInput, resultExtras } from '../analysisFacts.js';
 import type { StoredExplanation } from '../explain/explainer.js';
 import type { ExplanationInput } from '../explainTemplate.js';
 import type { ResultExtras } from '../explain/prompt.js';
@@ -213,48 +214,14 @@ export async function processAnalysis(d: ProcessDeps, analysisId: string): Promi
 
 export async function processExplanation(d: ProcessDeps, analysisId: string): Promise<void> {
   const analysis = await d.repos.analyses.findById(analysisId);
-  if (!analysis?.final || !analysis.ours) return;
-  if (analysis.status === 'done') return;
+  if (!analysis || analysis.status === 'done') return;
   const external = analysis.externalCheckId
     ? await d.repos.externalChecks.findById(analysis.externalCheckId)
     : null;
-  const ml = analysis.ml as {
-    mock?: boolean;
-    faces?: Array<{ scores?: { gendHead?: number; sbi?: number } }>;
-  } | null;
-  const input: ExplanationInput = {
-    final: analysis.final as ExplanationInput['final'],
-    ours: {
-      verdict: analysis.ours.verdict as ExplanationInput['ours']['verdict'],
-      probability: analysis.ours.probability ?? null,
-      threshold: analysis.ours.threshold ?? 0.5,
-      confident: analysis.ours.confident ?? false,
-      uncertainReason: analysis.ours.uncertainReason ?? null,
-      spread: analysis.ours.spread ?? null,
-    },
-    external: external
-      ? {
-          status: external.status,
-          deepfakeScore: external.deepfakeScore ?? null,
-          threshold: d.hiveThreshold,
-          verdict:
-            external.status === 'ok' && typeof external.deepfakeScore === 'number'
-              ? external.deepfakeScore >= d.hiveThreshold
-                ? 'FAKE'
-                : 'REAL'
-              : null,
-        }
-      : null,
-    mock: Boolean(ml?.mock),
-  };
+  const input = explanationInput(analysis, external, d.hiveThreshold);
+  if (!input) return;
   // Groq (when enabled) sees only the whitelisted result JSON built from these values.
-  const explanation = await d.explain(input, {
-    ruleApplied: analysis.final.ruleApplied ?? null,
-    detectorScores: ml?.faces?.[0]?.scores ?? null,
-    aiGeneratedScore: external?.aiGeneratedScore ?? null,
-    provider: external?.provider ?? null,
-    modelCardVersion: analysis.modelCardVersion ?? null,
-  });
+  const explanation = await d.explain(input, resultExtras(analysis, external));
   await d.repos.explanations.upsert(analysisId, explanation);
   await setStage(d, analysisId, 'done');
 }
